@@ -151,6 +151,8 @@ export async function answerPluginPage(p, m, theme, titled) {
     }
     case "asset":
       return import("./pageshare.js").then(() => pageAsset(e.url, m.params?.url, signal));
+    case "plugin.open":
+      return import("./pluginlink.js").then((x) => x.fromPage(p, m));
     case "image.copy":
     case "image.save":
       return import("./pageshare.js").then(() => pageShare(e.spec, m.method === "image.save", m.params));

@@ -90,6 +90,10 @@ func agentOf(r *http.Request) string {
 	if codexForClaudeCode(r.Header) {
 		return "codex"
 	}
+	if a := cloneOf(r); a != "" {
+		// omp in Claude Code's headers (claude_clones.go)
+		return a
+	}
 	return usage.AgentOf(ua)
 }
 
@@ -985,17 +989,20 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}
 	})
 	defer stopLimits()
+	// what it starts beside the server ends before it returns (loops.go)
+	var bg loops
 	freshCtx, stopFresh := context.WithCancel(ctx)
 	defer stopFresh()
 	// what another process writes to them is seen at once, not on the
 	// loops' next look (#3185)
-	go filememo.Watch(freshCtx, pluginrt.Path(), settings.Path(), provider.Path(), plugin.ListPath(), plugin.ToolsPath(), access.Path())
-	go pluginrt.KeepFresh(freshCtx, filememo.OthersEvery, settings.Path(), provider.Path(), plugin.ListPath(), plugin.ToolsPath(), access.Path())
+	rt, watched := pluginrt.Path(), []string{settings.Path(), provider.Path(), plugin.ListPath(), plugin.ToolsPath(), access.Path()}
+	bg.Go("filememo.Watch", func() { filememo.Watch(freshCtx, append([]string{rt}, watched...)...) })
+	bg.Go("pluginrt.KeepFresh", func() { pluginrt.KeepFresh(freshCtx, filememo.OthersEvery, watched...) })
 	// and the OpenCode plugins another magpie turned on or off, added,
 	// removed or updated (magpie plugin … in a terminal) are this one's at
 	// once, as the window's change is, not on the next request
 	noticed := make(chan struct{})
-	go func() { defer close(noticed); plugin.KeepNoticing(freshCtx, filememo.OthersEvery) }()
+	bg.Go("plugin.KeepNoticing", func() { defer close(noticed); plugin.KeepNoticing(freshCtx, filememo.OthersEvery) })
 	// and the MCP hub's servers that the Library no longer gives are ended
 	// It reads MCPHub, which a test swaps, so the gateway's end waits for
 	// it: once ListenAndServe has returned, nothing it started still looks.
@@ -1009,57 +1016,60 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	releaseServing := holdServing(ctx, servingLockPath(), func() func() {
 		// the magpie serving the gateway, and only it, keeps the saved accounts
 		// signed in, so two never refresh one sign-in at once
-		go provider.KeepLoginsAlive(ctx)
+		bg.Go("provider.KeepLoginsAlive", func() { provider.KeepLoginsAlive(ctx) })
 		// and tells the request hooks of an account to sign in again
-		go s.keepHooksToldOfSignIns(ctx)
+		bg.Go("keepHooksToldOfSignIns", func() { s.keepHooksToldOfSignIns(ctx) })
 		// and signs Codex and Claude Code in to their next account when the
 		// one they are on is spent
-		go provider.KeepOnAnAccountWithRoom(ctx)
+		bg.Go("provider.KeepOnAnAccountWithRoom", func() { provider.KeepOnAnAccountWithRoom(ctx) })
 		// and has the Codex app read its provider again as magpie becomes it
 		// for a used-up ChatGPT account, and after (its Send greys otherwise)
-		go provider.KeepCodexAppOnItsProvider(ctx, s.CodexBusy)
+		bg.Go("provider.KeepCodexAppOnItsProvider", func() { provider.KeepCodexAppOnItsProvider(ctx, s.CodexBusy) })
 		// and, when settings say to, starts its accounts' next windows as the last reset
-		go provider.KeepCodexWindowsWarm(ctx)
-		go provider.KeepClaudeWindowsWarm(ctx, warmClaude)
-		go provider.KeepAgyWindowsWarm(ctx)
+		bg.Go("provider.KeepCodexWindowsWarm", func() { provider.KeepCodexWindowsWarm(ctx) })
+		bg.Go("provider.KeepClaudeWindowsWarm", func() { provider.KeepClaudeWindowsWarm(ctx, warmClaude) })
+		bg.Go("provider.KeepAgyWindowsWarm", func() { provider.KeepAgyWindowsWarm(ctx) })
+		// and keeps Antigravity's fast-tools plugin starting a magpie that
+		// is there, once it is on
+		bg.Go("keepFastTools", keepFastTools)
 		// and spends a Codex reset about to run out unused, for the accounts
 		// that let it
-		go provider.KeepResetsFromRunningOut(ctx)
+		bg.Go("provider.KeepResetsFromRunningOut", func() { provider.KeepResetsFromRunningOut(ctx) })
 		// and checks the WorkBuddy accounts in for the day's credits
-		go provider.KeepWorkBuddyCheckedIn(ctx)
+		bg.Go("provider.KeepWorkBuddyCheckedIn", func() { provider.KeepWorkBuddyCheckedIn(ctx) })
 		// and the Trae CN accounts (#694), and the MiniMax Code ones (#811)
-		go provider.KeepTraeCheckedIn(ctx)
-		go provider.KeepMiniMaxCheckedIn(ctx)
+		bg.Go("provider.KeepTraeCheckedIn", func() { provider.KeepTraeCheckedIn(ctx) })
+		bg.Go("provider.KeepMiniMaxCheckedIn", func() { provider.KeepMiniMaxCheckedIn(ctx) })
 		// and the Qoder ones' daily credits
-		go provider.KeepQoderCheckedIn(ctx)
+		bg.Go("provider.KeepQoderCheckedIn", func() { provider.KeepQoderCheckedIn(ctx) })
 		// and the accounts of the plugins that check in themselves
-		go provider.KeepPluginsCheckedIn(ctx)
+		bg.Go("provider.KeepPluginsCheckedIn", func() { provider.KeepPluginsCheckedIn(ctx) })
 		// and counts the calls those plugins' accounts made outside magpie
 		// (Cursor's editor and cursor-agent) on the Usage page
-		go usage.KeepOutsideCallsRead(ctx)
+		bg.Go("usage.KeepOutsideCallsRead", func() { usage.KeepOutsideCallsRead(ctx) })
 		// and moves the built-in subscriptions being retired onto their plugins
-		go provider.KeepRetiringMoved(ctx)
+		bg.Go("provider.KeepRetiringMoved", func() { provider.KeepRetiringMoved(ctx) })
 		// and looks up which region the Claude accounts' way out to the
 		// internet is in, through each of their proxies (internal/egress)
-		go egress.Keep(ctx, provider.ClaudeProxies)
+		bg.Go("egress.Keep", func() { egress.Keep(ctx, provider.ClaudeProxies) })
 		// and fetches the partner list every hour, asked for or not
-		go provider.KeepPartnersFresh(ctx)
+		bg.Go("provider.KeepPartnersFresh", func() { provider.KeepPartnersFresh(ctx) })
 		stopPluginListings := plugin.ServeBackgroundListings(ctx, provider.KeepPluginsListed)
 		// and renews the plugins' sign-ins as they come due, used or not (#5080)
-		go provider.KeepPluginsSignedIn(ctx)
+		bg.Go("provider.KeepPluginsSignedIn", func() { provider.KeepPluginsSignedIn(ctx) })
 		// and those a signed-in account's vendor adds (a ChatGPT plan's new GPT)
-		go provider.KeepAccountsListed(ctx)
+		bg.Go("provider.KeepAccountsListed", func() { provider.KeepAccountsListed(ctx) })
 		// and fetches the lists of the providers the user asked to keep fresh (#2135)
-		go provider.KeepListsFresh(ctx)
+		bg.Go("provider.KeepListsFresh", func() { provider.KeepListsFresh(ctx) })
 		// and follows a Remote magpie's list as it changes there (KaCli)
-		go provider.KeepRemoteListsFollowed(ctx)
+		bg.Go("provider.KeepRemoteListsFollowed", func() { provider.KeepRemoteListsFollowed(ctx) })
 		// and reads the group rate of each key of a relay given a top-up rate (@YIXIE233 on X)
-		go provider.KeepKeyRatesRead(ctx)
+		bg.Go("provider.KeepKeyRatesRead", func() { provider.KeepKeyRatesRead(ctx) })
 		// and keeps the community's plugins up to date, noting others' updates, and the Bun they run on
-		go plugin.KeepUpdated(ctx)
-		go plugin.KeepBunUpdated(ctx)
+		bg.Go("plugin.KeepUpdated", func() { plugin.KeepUpdated(ctx) })
+		bg.Go("plugin.KeepBunUpdated", func() { plugin.KeepBunUpdated(ctx) })
 		for _, f := range WhileServing {
-			go f(ctx)
+			bg.Go(loopName(f), func() { f(ctx) })
 		}
 		stopAutoPicks := startAutoPicks(ctx)
 		stopSignIns := provider.KeepExtensionsSignedIn(ctx, s.extensions)
@@ -1075,21 +1085,23 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// and keeps macOS from App Napping the process the agents wait on (#6261)
 	defer awake.NoNap()()
 	// and, when settings say to, keeps the computer awake while agents work
-	go awake.Keep(ctx, func() awake.Level {
-		switch set := settings.Load(); {
-		case !set.KeepAwake:
-			return awake.Off
-		case set.KeepAwakeDisplay:
-			return awake.Display
-		}
-		return awake.System
-	}, func() awake.State {
-		b := s.Busy()
-		return awake.State{Busy: b.Any(), Last: b.Last}
+	bg.Go("awake.Keep", func() {
+		awake.Keep(ctx, func() awake.Level {
+			switch set := settings.Load(); {
+			case !set.KeepAwake:
+				return awake.Off
+			case set.KeepAwakeDisplay:
+				return awake.Display
+			}
+			return awake.System
+		}, func() awake.State {
+			b := s.Busy()
+			return awake.State{Busy: b.Any(), Last: b.Last}
+		})
 	})
 	// and, on Windows, serves WSL distros under NAT at Windows' address on
 	// their network (wsl.go)
-	go s.serveWSL(ctx, srv)
+	bg.Go("serveWSL", func() { s.serveWSL(ctx, srv) })
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
@@ -1144,6 +1156,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		if err == nil || errors.Is(err, http.ErrServerClosed) || s.notAccepting.Load() {
 			s.unread.stop()
 			<-drained
+			// ctx has ended, and with it every loop started beside the
+			// server: none writes into the config folder once this returns
+			bg.end()
 			return nil
 		}
 		// Relisten closed it to move the gateway: serve the one it opened
@@ -1324,6 +1339,17 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc(VisionMCPPath, s.visionMCP)
 	mux.HandleFunc(MemoryMCPPath, s.memoryMCP)
 	mux.HandleFunc(SessionsMCPPath, s.sessionsMCP)
+	mux.HandleFunc(ArtifactsMCPPath, s.artifactsMCP)
+	// an artifact's page and files, in a sandbox of their own (artifacts_mcp.go)
+	mux.HandleFunc("GET "+ArtifactPagePath+"{ref}", s.artifactPage)
+	mux.HandleFunc("GET "+ArtifactPagePath+"{ref}/{path...}", s.artifactPage)
+	mux.HandleFunc("POST "+ArtifactPagePath+"{ref}/"+artifactAPIDir+"db", s.artifactDB)
+	mux.HandleFunc("GET "+ArtifactPagePath+"{ref}/"+artifactAPIDir+"events", s.artifactEvents)
+	mux.HandleFunc("POST "+ArtifactPagePath+"{ref}/"+artifactAPIDir+"publish", s.artifactPublish)
+	mux.HandleFunc("POST "+ArtifactPagePath+"{ref}/"+artifactAPIDir+"meta", s.artifactMeta)
+	mux.HandleFunc("POST "+ArtifactPagePath+"{ref}/"+artifactAPIDir+"upload", s.artifactUpload)
+	mux.HandleFunc("POST "+ArtifactPagePath+"{ref}/"+artifactAPIDir+"assets", s.artifactAssets)
+	mux.HandleFunc("GET "+artifactBlobPath+"{id}", s.artifactBlob)
 	mux.HandleFunc(ImageMCPPath, s.imageMCP)
 	mux.HandleFunc(BrowserMCPPath, s.browserMCP)
 	mux.HandleFunc("GET "+BrowserExtensionPath, s.browserExtension)
@@ -1367,7 +1393,7 @@ var catalogSize stamped[struct{}, int]
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"name": "magpie", "version": Version, "models": catalogSize.get(struct{}{}, func() int { return len(provider.Catalog()) }), "window": Window,
-		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/systemone", "/v1beta/models/{model}:generateContent", "/v1/images/generations", "/v1/images/edits", "/v1/videos", NativePath + "{provider}/{path}", "/v1/embeddings", "/v1/rerank", "/v1/decisions", "/v1/audio/transcriptions", "/v1/audio/translations", "/v1/audio/speech", "/v1/realtime", "/v1/magpie/quotas", "/v1/magpie/quotas/history", AccountsPath, "/v1/magpie/usage", "/v1/magpie/usage/requests", "/v1/magpie/route", StatuslinePath, "/v1/magpie/trace", OwnMCPPath, SearchMCPPath, VisionMCPPath, MemoryMCPPath, SessionsMCPPath, ImageMCPPath, BrowserMCPPath, ToolsMCPPath, HubMCPAll, HubMCPPath + "{agent}"}}
+		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/systemone", "/v1beta/models/{model}:generateContent", "/v1/images/generations", "/v1/images/edits", "/v1/videos", NativePath + "{provider}/{path}", "/v1/embeddings", "/v1/rerank", "/v1/decisions", "/v1/audio/transcriptions", "/v1/audio/translations", "/v1/audio/speech", "/v1/realtime", "/v1/magpie/quotas", "/v1/magpie/quotas/history", AccountsPath, "/v1/magpie/usage", "/v1/magpie/usage/requests", "/v1/magpie/route", StatuslinePath, "/v1/magpie/trace", OwnMCPPath, SearchMCPPath, VisionMCPPath, MemoryMCPPath, SessionsMCPPath, ArtifactsMCPPath, ImageMCPPath, BrowserMCPPath, ToolsMCPPath, HubMCPAll, HubMCPPath + "{agent}"}}
 	// which process serves, for another magpie on this computer to name it
 	// on its Routing page (#2606); not told to another machine
 	if local(r) {
@@ -2366,6 +2392,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Anthropic, 400, err.Error())
 		return
 	}
+	r = withClone(r, provider.Anthropic, body)
 	named := unprefixed(model)
 	if m := claudeTierStandIn(r, agentOf(r), model); m != "" {
 		model = m // counted on the model the request will go to
@@ -2378,6 +2405,9 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		id = sid
 	}
 	pick := desktopSubagentPick(r, agentOf(r), named, id, body)
+	if pick == nil {
+		pick, _ = claudeSubagentPick(r, agentOf(r), named, id, body)
+	}
 	if pick.Moved() {
 		id = pick.To
 	}
@@ -2593,6 +2623,9 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 		// Qoder 1.1.82 and later name no session: the one of its own
 		// session files the request holds the prompts of (qoder_session.go)
 		r = qoderSession(r, from, body)
+		// an agent in Claude Code's headers is named as itself
+		// (claude_clones.go)
+		r = withClone(r, from, body)
 		// a Claude Code Message Thread magpie keeps no history for: sent
 		// again whole, without it (message_threads.go, #2480)
 		if from == provider.Anthropic && namesThread(body) {
@@ -3078,10 +3111,21 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	if subagent == nil {
 		subagent = s.codexSubagentPick(r, agent, call.Kind, call.Model, body, false)
 	}
-	var desktopPick *SubagentPick
+	var desktopPick, claudePick *SubagentPick
 	if subagent == nil {
 		desktopPick = desktopSubagentPick(r, agent, call.Model, asked, body)
 		subagent = desktopPick
+	}
+	// Claude Code's Explore and Plan, which inherit the lead's model past
+	// the subagent model set (#7176), on that model and its effort
+	if subagent == nil {
+		var effort string
+		claudePick, effort = claudeSubagentPick(r, agent, call.Model, asked, body)
+		subagent = claudePick
+		if claudePick.Moved() {
+			// the lead's model's effort stays with the lead
+			askedEffort = effort
+		}
 	}
 	if subagent.Moved() {
 		call.Model, asked = subagent.Asked, subagent.To
@@ -3091,7 +3135,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		askedEffort = subagentEffort
 	}
 	// any Claude Code subagent's turn, moved or not, for the Routing page's tag
-	subagentID := subagentTurnOf(r, agent, call.Kind, body, desktopPick != nil || subagentEffort != "")
+	subagentID := subagentTurnOf(r, agent, call.Kind, body, desktopPick != nil || claudePick != nil || subagentEffort != "")
 	if _, held := keyHolds(r); !held {
 		// auto groups off: a bare name several vendors serve, none the
 		// agent's own, goes to none of them (freefcw on X)
@@ -3125,6 +3169,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			return
 		}
 		msg := unknownModel(call.Model, "")
+		if moved != nil && asked != call.Model {
+			// magpie put it on another model (Claude Desktop's moves), and
+			// that one is gone: name it, not the one the client asked for,
+			// which magpie serves (#6719: "magpie knows no model X; did
+			// you mean X?")
+			msg = unknownModel(asked, fmt.Sprintf(" (magpie sent this request for %q there)", call.Model))
+		}
 		if g, ok := provider.DisabledGroup(asked); ok {
 			call.Error = "group switched off"
 			msg = fmt.Sprintf("the routing group %s is switched off in Magpie, so %q is not served; switch it on again on Magpie's Routing page to use it", g.Name, call.Model)
@@ -3996,6 +4047,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		patienceFallback = waitsOf(p.Patience, singlePatience)
 	}
 	patience = maxWaits(cands, patienceFallback)
+	if patienceSpared(r) {
+		patience = 0 // a classifier with another after it (askChat)
+	}
 	var busyNow []busyTry  // the members of this round that failed so
 	rounds := 0            // the rounds they were asked again in
 	var waitFrom time.Time // when every member had first failed so

@@ -970,6 +970,33 @@ function readAuthState(buf = readFileSteady(authPath)) {
   return { all: {}, known: false }
 }
 
+// authKnown is each sign-in as this host last read or wrote it: key → its
+// JSON. Another magpie writes plugin-auth.json too: the window while the
+// gateway runs as a service, or the other way round. A sign-in it saved
+// again over an account this host had a loader for (settle: the same
+// Google account signed in again with agy-cli's "Add another Google
+// account", its home now in its metadata) was served by the loader made
+// from the old one until the host restarted (mayne_wong on X: a gateway
+// run as a LaunchDaemon kept answering 401 for an account the window had
+// put right). So a sign-in that reads otherwise than this host left it is
+// forgotten as one changed here is (forgetAccount), and magpie is told of
+// an account added or removed (an "auth" event), which it lists again.
+let authKnown = null // Map key → JSON
+
+// noteAuth takes all, the sign-ins as just read (own false) or as this
+// host is writing them (own true).
+function noteAuth(all, own = false) {
+  const now = new Map(Object.entries(all).map(([k, v]) => [k, JSON.stringify(v)]))
+  const was = authKnown
+  authKnown = now
+  if (own || !was) return
+  for (const k of new Set([...was.keys(), ...now.keys()])) {
+    if (was.get(k) === now.get(k)) continue
+    forgetAccount(k)
+    if (!was.has(k) || !now.has(k)) send({ event: "auth", provider: providerOf(k), account: k })
+  }
+}
+
 // authSeen is plugin-auth.json as last parsed. Display reads can reuse a
 // settled file's metadata. Fresh reads and dispatch checks compare the
 // contents before reusing the parsed sign-ins.
@@ -996,6 +1023,7 @@ function readAuthView(strict = false) {
   const digest = buf && createHash("sha256").update(buf).digest("hex")
   if (same && digest === e.digest) return e
   const s = readAuthState(buf)
+  if (s.known) noteAuth(s.all)
   authSeen = st && s.own ? { ...s, mtimeMs: st.mtimeMs, size: st.size, ino: st.ino, digest } : null
   return s
 }
@@ -1112,10 +1140,12 @@ function changeAuth(change, published, signal = signInSignal.getStore()) {
     do {
       signal?.throwIfAborted()
       const { snapshot: { records, version, known } } = await authStore()
+      if (known) noteAuth(records)
       const out = change(records, known)
       if (out === false || (!known && !Object.keys(records).length)) return out
       signal?.throwIfAborted()
       if (!(await authStore({ version, records })).retry) {
+        noteAuth(records, true)
         published?.(out)
         return out
       }
@@ -1238,6 +1268,8 @@ async function modifyPiCredential(key, edit) {
   }
   return piCredential(key, selected)
 }
+// opens.js names the plugin whose program it refused by this
+globalThis[Symbol.for("magpie.spawnedBy")] = () => scope.getStore()?.provider ?? ""
 
 function whoOf(a) {
   return a?.accountId ?? a?.metadata?.email ?? a?.email ?? ""

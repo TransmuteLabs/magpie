@@ -19,16 +19,16 @@ import (
 // masking it says so with this; the other masks it again only when its
 // own fingerprint differs: masked twice by the same settings, the second
 // pass finds nothing the first left, and costs the request another run of
-// the rules and of the local model (YeYaka88 on X). It reads no file and
-// starts no download.
+// the rules and of the local model (YeYaka88 on X). It starts no download.
 func Fingerprint(st settings.Settings) string {
 	// Relay peers must make their own pass for an installed rule set.
 	if st.RedactRuleSet != "" || !Wanted(st) {
 		return ""
 	}
 	type modelPart struct {
-		ID    string  `json:"id"`
-		Score float64 `json:"score"`
+		ID         string  `json:"id"`
+		Score      float64 `json:"score"`
+		Generation string  `json:"generation,omitempty"`
 	}
 	f := struct {
 		Secrets  bool              `json:"secrets"`
@@ -50,8 +50,8 @@ func Fingerprint(st settings.Settings) string {
 	if (st.Redact || st.RedactPersonal) && ModelWanted(st) {
 		// the model optionsCtx asks, without picked's download: one not
 		// on disk masks nothing yet, so it isn't part of it
-		if m := pii.Of(pii.Choose(st.RedactModelName, true)); m.Installed() {
-			f.Model = &modelPart{ID: m.ID(), Score: pii.Threshold(st.RedactModelScore, m)}
+		if m := chosen(st); m.Installed() {
+			f.Model = &modelPart{ID: m.ID(), Score: pii.Threshold(st.RedactModelScore, m), Generation: m.Generation()}
 		}
 	}
 	b, err := json.Marshal(f)
@@ -61,3 +61,7 @@ func Fingerprint(st settings.Settings) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:16])
 }
+
+// chosen is the model optionsCtx asks under st, without picked's download;
+// a var for tests.
+var chosen = func(st settings.Settings) pii.Model { return pii.Of(pii.Choose(st.RedactModelName, true)) }

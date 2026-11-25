@@ -198,6 +198,7 @@
   let npmTries = 0;
   let npmAnswered = false; // npm was asked once: no downloads then means none to rank by
   let countsGone = false; // plugincounts.js didn't load: no magpie counts to wait for
+  let weekPicks;
   async function askNPM(only) {
     const names = [...new Set([...(listings || []).map((l) => l.package), ...(mine?.plugins || []).filter((e) => onNPM(e.spec)).map((e) => name(e.spec))])]
       .filter((n) => !only || !npm[n]);
@@ -238,7 +239,17 @@
       providers ? null : loadProviders().then(drawBody, () => {}),
     ];
     import("./plugincounts.js").then(() => window.pmCounts.load(drawBody), () => { countsGone = true; drawBody(); });
+    if (!weekPicks) {
+      import("./pluginweek.js").then(({ picks }) => {
+        weekPicks = picks;
+        drawBody();
+      }, () => {
+        weekPicks = () => null;
+        drawBody();
+      });
+    }
     import("./pluginpartners.js").then(drawBody, () => {});
+    import("./pluginglide.js").catch(() => {});
     await Promise.all(parts);
     askNPM();
     askGit();
@@ -690,8 +701,6 @@
   // only order what neither knows
   const byHot = (a, b) => usersOf(b) - usersOf(a) || hotOf(b) - hotOf(a) || (b.github?.stars || 0) - (a.github?.stars || 0) || nameOrder(a, b);
   const ranked = (list, how = sortPick) => [...list].sort(how === "name" ? nameOrder : how === "liked" && window.pmCounts ? (a, b) => pmCounts.order(a, b, byHot) : byHot);
-  // the day in the reader's own calendar, which the daily pick turns on
-  const today = () => { const d = new Date(); return Math.floor((d.getTime() - d.getTimezoneOffset() * 6e4) / 864e5); };
 
   // every plugin the market can show: the list's, and the repositories
   // tagged on GitHub it doesn't list already
@@ -730,22 +739,6 @@
     box.onkeydown = (ev) => { if (ev.target === box && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); detail(l); } };
   };
 
-  // the week's picks: undefined till npm and usemagpie.ai have answered,
-  // null when neither knows of any use
-  function picks(all) {
-    if (!npmAnswered || !(countsGone || window.pmCounts?.answered)) return undefined;
-    const used = all.filter((l) => usersOf(l) > 0).sort((a, b) => usersOf(b) - usersOf(a) || likesOf(b) - likesOf(a) || byHot(a, b));
-    const liked = all.filter((l) => likesOf(l) > 0).sort((a, b) => likesOf(b) - likesOf(a) || usersOf(b) - usersOf(a) || byHot(a, b));
-    // with no counts from magpie (offline, or none yet), npm's downloads
-    const downloaded = used.length ? [] : ranked(all.filter((l) => !l.github && hotOf(l) > 0), "hot");
-    // the day's: one of the community's most used not installed yet, a
-    // different one each day
-    const by = (used.length ? used : downloaded).filter((l) => !l.github);
-    if (!by.length) return null;
-    let pool = by.filter((l) => l.community && !entryOf(l.package)).slice(0, 14);
-    if (!pool.length) pool = by.slice(0, 14);
-    return { day: pool[today() % pool.length], used: used.slice(0, 5), liked: liked.slice(0, 5), downloaded: downloaded.slice(0, 5) };
-  }
   function hero(l) {
     const box = el("article", "pm-hero");
     opens(box, l);
@@ -788,7 +781,8 @@
     return box;
   }
   function recSection(all) {
-    const p = picks(all);
+    const p = npmAnswered && (countsGone || window.pmCounts?.answered)
+      ? weekPicks?.(all, { usersOf, likesOf, hotOf, byHot, entryOf }) : undefined;
     if (p === null) return null;
     const sec = el("section", "pm-sec pm-recs");
     const h = el("div", "pm-rectitle");
@@ -903,7 +897,7 @@
       const more = el("button", "pm-more");
       more.type = "button";
       more.append(el("span", "", t("See all")), glyph("M6 3.5 10.5 8 6 12.5", 11, 1.7));
-      more.onclick = () => { kindPick = k; drawBody(); page.scrollTo({ top: 0 }); };
+      more.onclick = () => { kindPick = k; drawBody(); };
       h.append(el("span", "grow"), more);
     }
     box.append(h, cardGrid(list.slice(0, limit)));
@@ -1071,9 +1065,11 @@
     const partners = window.pmPartners?.({ f, all: everything(() => true), kindPick, srcPick, onlyNew, entryOf, kindOf, opens, npm, logo, actionFor, glyph, OUTL });
     if (partners) out.push(partners);
     if (!f) {
-      const rec = !kindPick && recSection(all);
+      const rec = recSection(all);
       if (rec) out.push(rec);
       out.push(...market(all));
+      // a kind picked keeps the week's picks; pluginglide.js glides the bar up
+      if (window.pmGlide) out.push(pmGlide.room(kindPick, page));
       out.push(manual(), footer());
       if (mine?.registry) {
         out.push(regBox = regBox || el("div", "pm-registry"));
@@ -1831,6 +1827,8 @@
       w.append(glyph(SHIELD, 12, 1.5), el("span", "", t(from, { owner: l.github.owner, topic })));
       main.append(w);
     }
+    // pluginlink.js's, for a package the market doesn't list
+    main.append(l.note || "");
     if (l.replaces) main.append(el("p", "pm-note", t("magpie's own sign-in to this subscription is deprecated: this plugin takes its place, and accounts signed in there move to it.")));
     const readme = el("div", "pm-readme");
     const pageKey = l.package + "\n" + (document.documentElement.lang || "en");
@@ -1893,4 +1891,9 @@
   // opened on the Plugins tab (?view=plugins): app.js showed it before
   // this file was here to load it
   if (view === "plugins") load();
+  // a package's sheet over the page the reader is on, for a plugin page's
+  // magpie.openPlugin, or the window opened by a magpie://plugin link
+  // (?plugin=): pluginlink.js
+  window.pluginOpen = (n) => import("./pluginlink.js").then((m) => m.open(n, async () => (mine && listings || await load(), [[listings, tagged], npm, detail])));
+  if (params.has("plugin")) pluginOpen(params);
 })();

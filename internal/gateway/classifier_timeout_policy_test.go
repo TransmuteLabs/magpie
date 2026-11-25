@@ -102,7 +102,7 @@ func TestClassifierTimeoutCauseRetainsParentAndPolicy(t *testing.T) {
 			var result error
 			go func() {
 				defer close(finished)
-				_, result = server.askLeast(ctx, wait, "timeout-judge/judge", func(effort string) []byte {
+				_, result = server.askLeast(ctx, wait, false, "timeout-judge/judge", func(effort string) []byte {
 					return classifyBody("timeout-judge/judge", effort, []string{"bug"}, before{}, "fix this")
 				})
 			}()

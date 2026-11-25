@@ -829,15 +829,26 @@ func claudeIn(at place) *Agent {
 		// environment magpie can't read)
 		ownOption := func() bool { return customOption || at.spell == nil && claudeShellEnv(claudeCustomOptionEnv) != "" }
 		replace := provider.OwnModelsHidden("claude") || claudeNarrowed() && !ownOption()
-		var onTier []string
+		// With the lineup replaced, each tier a model is on gets a row of
+		// its own, its model the tier's word, as the lineup's tier rows
+		// are: without one, "sonnet" named no row, and an app that runs
+		// Claude Code with "sonnet" and matches it against /model's rows by
+		// name (claude-agent-acp's resolveModelPreference, AWS Quick) took
+		// "Claude Sonnet 5.5", the real Claude model, while the user had
+		// put Sonnet on DeepSeek in magpie (LBaoheng24070 on X). The row
+		// stands for the tier's model, whose own row goes, as Claude Code
+		// leaves out a row naming a tier's model beside its lineup.
+		var onTier, tierWords []string
 		for _, t := range claudeTiers {
-			if replace {
-				break
+			v := claudeReadOwn(spell(tiers[t]))
+			if v == "" {
+				continue
 			}
-			if v := claudeReadOwn(spell(tiers[t])); v != "" {
-				if _, e := tierAt(v); e != "" {
-					onTier = append(onTier, v)
-				}
+			if replace {
+				onTier = append(onTier, v)
+				tierWords = append(tierWords, t)
+			} else if _, e := tierAt(v); e != "" {
+				onTier = append(onTier, v)
 			}
 		}
 		// each row's label is the model's name as every agent's list calls
@@ -847,11 +858,9 @@ func claudeIn(at place) *Agent {
 		// provider the label already says is left "via magpie".
 		labels := listLabels("claude")
 		var rows []builtinclaude.ModelPickerRow
-		for _, o := range viaMagpieShared("claude", "") {
-			if slices.ContainsFunc(onTier, func(v string) bool { return claudeSameModel(v, o.Value) }) {
-				continue
-			}
-			label, note := cmp.Or(labels[o.Ref], o.Label, o.Value), o.Note
+		// named is the label and description of o's row
+		named := func(o Option) (label, note string) {
+			label, note = cmp.Or(labels[o.Ref], o.Label, o.Value), o.Note
 			// a subscription's note is its account alone, so a label left
 			// without its provider (Off, or a name the user gave) named
 			// neither in /model; the provider goes before the account then,
@@ -864,6 +873,26 @@ func claudeIn(at place) *Agent {
 					note = o.Group + " · " + note
 				}
 			}
+			return label, note
+		}
+		sameAs := func(v string, o Option) bool {
+			return claudeSameModel(v, o.Value) || claudeSameModel(v, spell(o.Value))
+		}
+		via := viaMagpieShared("claude", "")
+		// a tier's row is named as its model's would be, the tier first
+		for _, t := range tierWords {
+			v := claudeReadOwn(spell(tiers[t]))
+			label, note := v, "via magpie"
+			if i := slices.IndexFunc(via, func(o Option) bool { return sameAs(v, o) }); i >= 0 {
+				label, note = named(via[i])
+			}
+			rows = append(rows, builtinclaude.ModelPickerRow{Model: t, Label: label, Description: strings.ToUpper(t[:1]) + t[1:] + " · " + note})
+		}
+		for _, o := range via {
+			if slices.ContainsFunc(onTier, func(v string) bool { return sameAs(v, o) }) {
+				continue
+			}
+			label, note := named(o)
 			rows = append(rows, builtinclaude.ModelPickerRow{Model: spell(mark1M(o.Value)), Label: label, Description: note})
 		}
 		// the switch that leaves a picker's own models out (#1642) reaches
@@ -1514,7 +1543,9 @@ func claudeIn(at place) *Agent {
 	}
 	// subagents: the model one runs on when it names none (general-purpose,
 	// an agent of the user's without a model:). Unset, the session's, as
-	// before; an agent that names a tier (Explore's haiku) takes the tier's.
+	// before. Explore and Plan say inherit, so Claude Code never reads the
+	// variable for them; the gateway moves their turns onto it
+	// (gateway.claudeSubagentPick, #7176).
 	// setSubagent writes the subagents' model and effort. With no model,
 	// the variable goes and the effort is kept unwritten (subagentSaved):
 	// the main model at an effort would pin every subagent to it.
@@ -1765,9 +1796,10 @@ func claudeIn(at place) *Agent {
 		ID: "claude", Name: "Claude Code", Icon: "claudecode-color", Aliases: []string{"cc", "claude-code"},
 		UA:  []string{"claude-cli", "claude-code"},
 		Bin: "claude", Dir: filepath.Dir(path), Path: path, signIn: ".credentials.json",
-		Fields:       fields,
-		ModelAliases: claudeAliases,
-		Telemetry:    claudeTelemetry(at, path),
+		claudeSettings: &ClaudeSettings{path: path, distro: at.wsl},
+		Fields:         fields,
+		ModelAliases:   claudeAliases,
+		Telemetry:      claudeTelemetry(at, path),
 		// Claude Code as it was before magpie: its default puts it back as
 		// installed, on Anthropic's endpoint, where this brings back the
 		// endpoint, token and model the user had

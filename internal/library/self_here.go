@@ -39,7 +39,21 @@ func ownServer(s *Server) bool {
 		return true
 	}
 	exe, err := selfExe()
-	return err == nil && exe != "" && s.Command == exe
+	if err != nil || exe == "" {
+		return false
+	}
+	if s.Command == exe {
+		return true
+	}
+	if !filepath.IsAbs(s.Command) || !filepath.IsAbs(exe) {
+		return false
+	}
+	cmdInfo, err := os.Stat(s.Command)
+	if err != nil || cmdInfo.IsDir() {
+		return false
+	}
+	exeInfo, err := os.Stat(exe)
+	return err == nil && !exeInfo.IsDir() && os.SameFile(cmdInfo, exeInfo)
 }
 
 func magpieBinary(cmd string) bool {

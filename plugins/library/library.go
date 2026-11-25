@@ -15,7 +15,7 @@ func init() {
 		Name: "Library", Sub: "Instructions, MCP servers, skills and hooks, kept once and given to every agent",
 		One: "1 item given to agents", Many: "{n} items given to agents",
 		InUse:  lib.InUse,
-		Client: []string{"i18n.js", "library.css", "client.js"},
+		Client: []string{"i18n.js", "library.css", "artifacts.js", "client.js"},
 		Parts:  []sdk.FeaturePart{{Slot: sdk.FeatureNavigationPage, Key: "library"}},
 		Settings: []sdk.FeatureSetting{{
 			Name: "hide", Kind: sdk.FeatureSettingString, Title: "Hidden sections",

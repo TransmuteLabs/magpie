@@ -102,6 +102,9 @@ type file struct {
 	broken  map[string]bool
 	written map[string]string
 	metaB   []byte
+	// counts are what this change does, counted once it is written
+	// (stats.go)
+	counts *Day
 }
 
 // maxDismissed is how many dismissed texts are kept.
@@ -318,10 +321,12 @@ func saveRecord(ctx context.Context, in Input, origin string, src *Source, proj 
 				o.Edited = t
 			}
 			m = o
+			f.tally().Updated++
 			return nil
 		}
 		m.ID = newID()
 		f.Memories = append(f.Memories, m)
+		f.tally().created(origin)
 		added = true
 		return nil
 	})
@@ -414,6 +419,12 @@ func editIn(f *file, m *Memory, in Input, byUser bool) error {
 	if byUser && (in.Text != nil || in.Kind != nil || in.Scope != nil || in.Why != nil) {
 		c.Origin = FromUser
 	}
+	if !live(&c) {
+		f.leaves(m, map[bool]string{true: ByYou, false: ByAgent}[byUser])
+	}
+	if c.Text != m.Text || c.Kind != m.Kind || c.Scope != m.Scope || c.Why != m.Why || c.Pinned != m.Pinned || !slices.Equal(c.Tags, m.Tags) {
+		f.tally().Updated++
+	}
 	c.Updated = now()
 	if byUser {
 		c.Edited = c.Updated
@@ -462,6 +473,7 @@ func Remove(ids ...string) error {
 		n := len(f.Memories)
 		f.Memories = slices.DeleteFunc(f.Memories, func(m *Memory) bool {
 			if slices.Contains(ids, m.ID) {
+				f.leaves(m, ByYou)
 				dismiss(f, m)
 				removed(f, m.ID)
 				return true

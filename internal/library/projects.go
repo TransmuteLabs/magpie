@@ -60,6 +60,10 @@ type Project struct {
 	// Trees are the project's folder in each other worktree of its git
 	// repository, given the project's set, with what magpie put in each
 	Trees []*Project `json:"trees,omitempty"`
+	// MainOnly keeps the project's set to this checkout: the
+	// repository's other worktrees get none of it, and what magpie put
+	// there comes out (#7252)
+	MainOnly bool `json:"mainOnly,omitempty"`
 	// Subagents are the library's subagents the project has, and for which
 	// agents; AgentFiles the files magpie wrote for them, by their hash
 	// (project_subagents.go)
@@ -92,9 +96,16 @@ type Project struct {
 	// (project_pi.go)
 	Pi     map[string]string `json:"pi,omitempty"`
 	PiRecs []PiRec           `json:"piRecs,omitempty"`
-	// reshaped: claudePlugins or pi was read in another build's shape
+	// PiNotCarried are what another build kept in the project's pi that
+	// magpie has no place for, kept as read (project_shapes.go)
+	PiNotCarried []PiNotCarried `json:"piNotCarried,omitempty"`
+	// reshaped: claudePlugins or pi was read in another build's shape;
+	// piFromOld the Pi sources read so, which another build declared in
+	// the project's file; piStrays: pi held v0.1.4702's literals
 	// (project_shapes.go)
-	reshaped bool
+	reshaped  bool
+	piFromOld map[string]bool
+	piStrays  bool
 }
 
 // projectSkillsDirs is where, in a project, each agent reads skills of its
@@ -635,6 +646,20 @@ func ProjectCopy(dir string, copy bool) (*Result, error) {
 	})
 }
 
+// ProjectMainOnly sets whether a project's set stays in its own checkout:
+// on, the repository's other worktrees get none of it, and what magpie put
+// in them is taken out; off, they follow the project again (#7252).
+func ProjectMainOnly(dir string, on bool) (*Result, error) {
+	return change(func(l *Library) error {
+		p := l.project(dir)
+		if p == nil {
+			return fmt.Errorf("no project %s", dir)
+		}
+		p.MainOnly = on
+		return nil
+	})
+}
+
 // ProjectView is a project as the page shows it.
 type ProjectView struct {
 	Dir     string              `json:"dir"`
@@ -652,6 +677,8 @@ type ProjectView struct {
 	// Trees are the project's folder in the repository's other git
 	// worktrees, which follow it
 	Trees []string `json:"trees,omitempty"`
+	// MainOnly: the other worktrees get none of the project's set
+	MainOnly bool `json:"mainOnly,omitempty"`
 	// Subagents are the library's subagents the project has, for the
 	// agents named
 	Subagents map[string][]string `json:"subagents"`
@@ -677,6 +704,9 @@ type ProjectView struct {
 	ClaudeTwice  map[string]string `json:"claudeTwice,omitempty"`
 	// Pi are the Pi packages the project has by magpie (#7249)
 	Pi []ProjectPiView `json:"pi"`
+	// PiNotCarried are entries another build kept in the project's pi
+	// that magpie has no place for (#7282)
+	PiNotCarried []PiNotCarried `json:"piNotCarried,omitempty"`
 	// Hooks are the library's hooks the project has on their own, for
 	// the agents given
 	Hooks map[string][]string `json:"hooks"`
@@ -730,6 +760,7 @@ func projectViews(l *Library, problems []Problem) []ProjectView {
 		v.ClaudePlugins = append([]string{}, p.ClaudePlugins...)
 		v.ClaudeNative, v.ClaudeTwice = l.projectClaudeOverlap(p, userNatives)
 		v.Pi = append([]ProjectPiView{}, p.piViews()...)
+		v.PiNotCarried = p.PiNotCarried
 		v.Hooks = map[string][]string{}
 		for k, a := range p.Hooks {
 			v.Hooks[k] = append([]string{}, a...)
@@ -737,6 +768,7 @@ func projectViews(l *Library, problems []Problem) []ProjectView {
 		for _, t := range p.Trees {
 			v.Trees = append(v.Trees, t.Dir)
 		}
+		v.MainOnly = p.MainOnly
 		if fi, err := os.Stat(p.Dir); err != nil || !fi.IsDir() {
 			v.Missing = true
 		} else {

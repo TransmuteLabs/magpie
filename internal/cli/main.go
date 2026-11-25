@@ -26,6 +26,7 @@ import (
 	"github.com/yetone/magpie/internal/codexrelay"
 	"github.com/yetone/magpie/internal/davsync"
 	"github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/fasttools"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/imagemcp"
@@ -88,6 +89,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie github [on github://<owner>/<repo>[/<folder>]|set k=v…|now|off]   the same in an encrypted GitHub repository (magpie github help)
 
   magpie library [sync|instructions|mcp|skill]   the instructions, MCP servers and skills written into every agent (magpie library help)
+  magpie artifacts [open <id>|delete <id>] [--json]   the pages agents published through Magpie Artifacts, as Work › Artifacts lists them
 
   magpie providers                list your providers: host, key, models, who uses them
   magpie presets                  the vendors magpie knows: add one with just a key
@@ -170,6 +172,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie gateway-key oidc add --key <id> --repo owner/name [--ref refs/heads/main] [--environment name] [--claim name=value]… [--ttl 1h] [--issuer URL] [--audience aud]
                                          let a CI job's OIDC token (GitHub Actions by default) be traded for a key issued under <id> (POST /v1/magpie/keys/oidc); oidc list | remove <rule id>
   magpie mcp image                the image and video generation MCP server an agent is given from the library (stdio)
+  magpie fast-tools mcp|session-start   what Antigravity's fast-tools plugin starts (magpie agy fasttools on): batched search, reads, edits and checks (stdio MCP), and the workspace snapshot hook
   magpie tools [<name>]           the tools magpie's MCP servers give agents (images, vision, web search, plugins'), with their parameters
   magpie tool <name> [--<param> <value>…] [<words>] [-o <file|folder>] [--json]   call one through the running magpie; an image or video it makes is saved
   magpie usage [today|7d|30d|all] tokens and cost per agent, model and subscription account (30d)
@@ -519,7 +522,12 @@ func runWithRestart(args []string, beforeRestart func()) error {
 			if len(args) > 1 && args[1] == "sessions" {
 				return browsermcp.RunSessions(args[2:])
 			}
+			if len(args) > 1 && args[1] == "artifacts" {
+				return browsermcp.RunArtifacts(args[2:])
+			}
 			return imagemcp.Run(args[1:])
+		case "fast-tools": // what Antigravity's fast-tools plugin starts: its MCP server and SessionStart hook
+			return fasttools.Run(args[1:])
 		case "claude-mcp-helper": // internal: stdio MCP subprocess spawned by Claude Code
 			return claudebridge.RunMCP(args[1:])
 		case claudetui.Command: // internal: Claude Code's interactive mode for the bridge
@@ -573,6 +581,9 @@ func runWithRestart(args []string, beforeRestart func()) error {
 	// and its auto mode classifier, on a sonnet tier that follows a main
 	// model /model has moved, to the model it moved to
 	gateway.ClassifierStandIn = agent.ClassifierStandIn
+	// and its Explore and Plan subagents, which inherit the lead's model
+	// past CLAUDE_CODE_SUBAGENT_MODEL, to the model set for its subagents
+	gateway.ClaudeSubagent = agent.ClaudeSubagent
 	// a Codex that reaches magpie for account failover alone is handed
 	// only its own models (#1385)
 	gateway.CodexOwnOnly = agent.CodexOwnOnly
@@ -731,6 +742,8 @@ func runWithRestart(args []string, beforeRestart func()) error {
 		return usageCmd(args)
 	case "sessions":
 		return sessionsCmd(args)
+	case "artifacts", "artifact":
+		return artifactsCmd(args)
 	case "quota", "quotas":
 		return quotaCmd(args)
 	case "status":

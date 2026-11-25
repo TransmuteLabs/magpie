@@ -108,7 +108,8 @@ func adoptPluginTools() (bool, error) {
 		return false, err
 	}
 	// and each Remote magpie's router's (bridge_mcp.go)
-	if plugins, bridges := l.adoptPlugins(), l.adoptBridges(); !plugins && !bridges {
+	// and Magpie Artifacts given unasked taken back, once (artifacts.go)
+	if plugins, bridges, arts := l.adoptPlugins(), l.adoptBridges(), l.withdrawArtifacts(); !plugins && !bridges && !arts {
 		return false, nil
 	}
 	return true, l.save()

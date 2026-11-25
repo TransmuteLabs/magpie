@@ -327,6 +327,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
       <tr><td><code>magpie.name</code></td><td>插件在「已安装」里那一行的名字；它的页面没写标题时，也是侧边栏标签的名字。只对社区列表没收录的插件有效（列表里的名字优先）。npm 包名只能是 ASCII，所以「华为云 HUAWEI」这样的名字写在这里。一行，最多 80 字节，否则忽略。它只是包自己的说法：不会显示为已审核，也不会用来按名字查找插件。打了 <code>magpie-plugin</code> 标签的仓库，在「发现 → 非官方插件 · GitHub」的卡片上也用它代替仓库名。</td></tr>
       <tr><td><code>magpie.summary</code></td><td>「发现 → 非官方插件 · GitHub」卡片上的那行简介，按语言写：<code>{ "en": "…", "zh": "…" }</code>。按窗口语言显示（繁体中文读 <code>zh</code>），没有就用英文，再没有就用 GitHub 的仓库描述。每种语言一行，最多 300 字节，否则忽略。卡片上的名字或简介来自包自己时，会标「包自己的话」：没有人审阅过。</td></tr>
       <tr><td><code>magpie.maxConcurrency</code></td><td>每个账号同时接多少个请求，1 到 1000 的整数。用户在供应商上设置的上限优先。</td></tr>
+      <tr id="privacy-models"><td><code>magpie.privacyModels</code></td><td>一个本地脱敏模型，在 设置 › 隐私 里和 AstrLink Guard、Privacy Filter 并列可选：<code>{ "command": "bin/detect", "args": ["--quiet"] }</code>。<code>command</code> 是 PATH 上的程序、绝对路径，或包里的文件（带斜杠的路径）。它在 stdin 和 stdout 上讲 pf-serve 的协议，从插件目录启动，参数是 <code>args</code> 再加上选中模型的路径。用户在插件选项里列出模型：<code>{ "models": [{ "id": "v1", "name": "我的检测器", "path": "/abs/model", "revision": "r2", "minScore": 0.8 }] }</code>（id 只用 a–z、0–9、<code>-</code> 和 <code>_</code>；路径必须是绝对路径；<code>revision</code> 和 <code>minScore</code> 可省，<code>minScore</code> 在 0.5 到 1 之间，不含 1）。改名字或 minScore 立即生效；换路径、revision、启动程序或版本，或模型文件变了，会停掉程序重新启动，旧模型找到的内容一概不沿用。只有这一项的插件不启动插件宿主。</td></tr>
     </table></div>
     <p>同样的字段也可以写在 <code>auth</code> 钩子上（<code>auth.icon</code>、<code>auth.maxConcurrency</code>），优先于 <code>package.json</code>。一个插件登录多个供应商时，可以给每个供应商各写一个 <code>auth.icon</code>，<code>magpie.icon</code> 留给插件本身。</p>
 
@@ -738,6 +739,7 @@ m plugin logout acme</pre>
     <h2 id="publish"><a class="anchor" href="#publish">发布与上架</a></h2>
     <ul>
       <li><b>npm。</b>照常发布。用户可以按名字添加（<code>magpie plugin add opencode-acme-auth</code>），按版本（<code>…@0.2.0</code>），从 git，或从文件夹。</li>
+      <li><b>链接。</b><code>magpie://plugin?name=opencode-acme-auth</code>（带 scope 的名字编码与否都可以：<code>?name=@acme/opencode-auth</code>）会打开 magpie 的<span class="ui">插件</span>页，停在这个包的详情上：README、发布者和<span class="ui">安装</span>按钮，由用户自己点。链接本身不安装任何东西。它只接受 npm 包名，不接受版本、路径、git 或 URL；不在推荐列表里的包会注明 magpie 没有人审核过它。</li>
       <li><b>搜索。</b><span class="ui">插件</span>里的搜索会向 npm 查询 <code>&lt;关键词&gt; opencode</code>，显示名字或 keywords 里同时含有 <code>opencode</code> 和 <code>auth</code>、<code>plugin</code>、<code>provider</code> 之一的包。keywords 写成 <code>["opencode", "opencode-plugin", "&lt;厂商&gt;"]</code> 就可以。它还会查询 <code>keywords:pi-package &lt;关键词&gt;</code>，显示名字或 keywords 里提到 <code>auth</code> 或 <code>provider</code> 的 pi 扩展包。</li>
       <li><b>README。</b>插件在 magpie 里的详情页显示它在 npm 上的 README。写清楚它登录什么、怎么登录、登录信息存在哪里、有哪些模型。</li>
       <li><b>推荐列表。</b><span class="ui">插件</span>页推荐的是社区仓库 <a href="https://github.com/magpie-community/plugins/blob/main/registry.json"><code>registry.json</code></a> 里的插件。magpie 最多每六小时拉取一次，并内置一份副本，拉不到时使用。想被收录，就提一个 PR 加上一项：
@@ -937,8 +939,8 @@ claude mcp add --transport http magpie-tools http://127.0.0.1:3425/mcp/magpie/to
       <tr><td><code>id</code></td><td>Agent 页、用量和命令行里用的 id：小写字母、数字、<code>.</code>、<code>_</code> 和 <code>-</code>。和 magpie 内置 Agent 相同的 id（<code>codex</code>、<code>claude</code> 等）会被拒绝：插件是添加 Agent，不是替换。</td></tr>
       <tr><td><code>name</code></td><td>页面上显示的名字。不写就用 id。</td></tr>
       <tr><td><code>config</code></td><td>magpie 修改的文件。会展开 <code>~</code> 和 <code>$VAR</code>。文件不存在时会新建。</td></tr>
-      <tr><td><code>format</code></td><td><code>json</code>、<code>yaml</code> 或 <code>env</code>，文件名看不出格式时才需要写（<code>.json</code>/<code>.jsonc</code>、<code>.yaml</code>/<code>.yml</code>、<code>.env</code>）。暂不支持 TOML。</td></tr>
-      <tr><td><code>model</code></td><td>文件里模型的键，JSON 和 YAML 用点分路径（<code>llm.model</code>）。模型在 Agent 自己里面选（从 <code>connect</code> 写入的模型里挑，比如 Raycast）时不写它：这一行就只有连接开关、没有模型选择器，而 <code>connect</code>（这种插件必须有）调用时不带 <code>model</code>。</td></tr>
+      <tr><td><code>format</code></td><td><code>json</code>、<code>yaml</code>、<code>toml</code> 或 <code>env</code>，文件名看不出格式时才需要写（<code>.json</code>/<code>.jsonc</code>、<code>.yaml</code>/<code>.yml</code>、<code>.toml</code>、<code>.env</code>）。TOML 里键路径的最后一段是其余几段所指表里的键（<code>"model_providers.magpie.base_url"</code> 就是 <code>[model_providers.magpie]</code> 里的 <code>base_url</code>），对象写成一张单独的表。解析不了的 TOML 文件原样不动。</td></tr>
+      <tr><td><code>model</code></td><td>文件里模型的键，JSON、YAML 和 TOML 用点分路径（<code>llm.model</code>）。模型在 Agent 自己里面选（从 <code>connect</code> 写入的模型里挑，比如 Raycast）时不写它：这一行就只有连接开关、没有模型选择器，而 <code>connect</code>（这种插件必须有）调用时不带 <code>model</code>。</td></tr>
       <tr><td><code>startup</code></td><td>Agent 把新会话起始的模型存在 <code>connect</code> 所写文件之外的另一个文件里时，用它代替 <code>model</code>：那个文件的 <code>config</code> 和 <code>format</code>，<code>model</code> 是其中模型的键，<code>keys</code> 是原样写在模型旁边的键。PiG 的 provider 在 <code>models.json</code>，默认模型在 <code>settings.json</code>：<code>startup: { config: "~/.pig/agent/settings.json", model: "defaultModel", keys: { defaultProvider: "magpie" } }</code>。这一行就能选模型，断开时两个文件都还原。v0.1.3008 之前的 magpie 把这样的插件当作没写 <code>model</code> 的插件。</td></tr>
       <tr><td><code>prefix</code></td><td>写在 magpie 模型 id 前面的内容：通过 LiteLLM 访问 OpenAI 兼容接口的 Agent 用 <code>openai/</code>。id 本身是网关接受的 <code>&lt;供应商&gt;/&lt;模型&gt;</code>。</td></tr>
       <tr><td><code>bin</code>、<code>dir</code></td><td><code>PATH</code> 上的命令和配置目录，用来判断 Agent 是否已安装。</td></tr>
@@ -1009,6 +1011,7 @@ document.getElementById(<span class="s">"calls"</span>).textContent = `${s.calls
       <tr><td><code>magpie.theme, magpie.onTheme(fn)</code></td><td><code>{ dark, lang, tokens }</code>。bridge 也会在 <code>&lt;html&gt;</code> 上设置 <code>data-theme</code>、<code>lang</code>、<code>color-scheme</code> 以及 <code>--magpie-bg</code>、<code>--magpie-fg</code>、<code>--magpie-accent</code> 等，每次变化都会再设一次。</td></tr>
       <tr><td><code>magpie.options.get(), .set(o)</code></td><td>插件自己在 plugins.json 里的选项，不能是别的插件的。<code>set</code> 接受一个对象，返回保存后的选项，每秒最多一次。</td></tr>
       <tr><td><code>magpie.read(name, params)</code></td><td><code>magpie.permissions</code> 声明过的读取。其他的一律拒绝，窗口拒绝一次，magpie 再拒绝一次。<code>usage:summary</code>（<code>period</code>：<code>today</code>、<code>7d</code> 或 <code>30d</code>）给出调用数、错误数、token 和费用，以及前 20 个模型；<code>providers:list</code> 给出每个供应商的 id 和名字。没有任何读取会给出密钥、账号、登录信息或请求内容。</td></tr>
+      <tr><td><code>magpie.openPlugin(name)</code></td><td>在页面上打开 npm 包 <code>name</code> 的详情，带<span class="ui">安装</span>按钮由用户自己点；它不安装任何东西。只在页面正被看着、没有别的对话框时可用，每 1.5 秒一次。旧版 magpie 没有 <code>openPlugin</code>，先检测（<code>typeof magpie.openPlugin === "function"</code>），没有就显示包名让用户复制。</td></tr>
     </table></div>
     <h3>页面不能做什么</h3>
     <ul>

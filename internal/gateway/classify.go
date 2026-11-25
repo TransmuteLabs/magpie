@@ -67,6 +67,13 @@ type before struct {
 	Effort string // the reasoning picked for it, or ""
 	User   string // the user's message before this one (userSaid), cut to priorCap; "" for none
 	Reply  string // the assistant's last words before this message, its text alone, cut to priorCap; "" for none
+	// Then: how many of the group's classifiers are left to ask after
+	// this one should it not answer (Group.Classifiers). One with others
+	// after it is given part of the request's wait, not all of it, and
+	// no patience for its accounts' rests (askWaited), so the next is
+	// still asked in time. Not part of the question: an answer is the
+	// same wherever in the list it was asked.
+	Then int
 }
 
 // verdict is what a classifier said.
@@ -156,7 +163,7 @@ func (e effortFailed) Unwrap() error { return e.error }
 // cutShort is the waitSpent of a classifier given wait, what was left of
 // the request's classifier wait full, that didn't answer in it.
 func cutShort(model string, wait, full time.Duration) error {
-	return waitSpent{fmt.Errorf("%s gave no answer in the %s left of the request's classifier wait of %s, spent by the routing group above",
+	return waitSpent{fmt.Errorf("%s gave no answer in the %s left of the request's classifier wait of %s, spent by the routing group above or a classifier before it",
 		model, wait.Round(time.Millisecond), full)}
 }
 
@@ -286,25 +293,48 @@ func classifyContext(ctx context.Context, ask classifier, held access.Identity, 
 	return v, false, nil
 }
 
-// classifiedFor notes what group's classifier, model, gave the group's
-// turn: err, or an answer. A failure is the one the classifier last had
-// (classified.last), resting from it or not, so the group's card says the
-// vendor's words and when they were said, not the rest's.
-func classifiedFor(group, model string, err error) {
+// classifiedFor notes what group's classifiers, list, gave the group's
+// turn: err, the last one's when none could say, or an answer. A failure
+// is the one each classifier last had (classified.last), resting from it
+// or not, so the group's card says the vendor's words and when they were
+// said, not the rest's; with several, each one's, in order.
+func classifiedFor(group string, list []string, err error) {
 	classified.Lock()
 	defer classified.Unlock()
-	if err == nil {
+	if err == nil || len(list) == 0 {
 		delete(classified.group, group)
 		return
 	}
-	f, ok := classified.last[model]
-	if !ok {
-		f = classifyFailure{err: err.Error(), at: time.Now()}
+	f := classifyFailure{err: err.Error(), at: time.Now()}
+	if len(list) == 1 {
+		if last, ok := classified.last[list[0]]; ok {
+			f = last
+		}
+	} else {
+		var whys []string
+		for i, m := range list {
+			why := f.err
+			if last, ok := classified.last[m]; ok {
+				why = last.err
+				if i == 0 || last.at.Before(f.at) {
+					f.at = last.at
+				}
+			}
+			whys = append(whys, m+": "+why)
+		}
+		f.err = strings.Join(whys, "; ")
 	}
-	classified.group[group] = groupFailure{classifyFailure: f, model: model}
+	classified.group[group] = groupFailure{classifyFailure: f, model: ClassifiersKey(list)}
 }
 
-// GroupClassifierFailure is why group's classifier, model, couldn't say
+// ClassifiersKey is the key of a group's classifiers, list in order,
+// that GroupClassifierFailure reads a failure by: a classifier's own id
+// when it is the one (as it has always been), so a changed list reads
+// as the group's classifier changed.
+func ClassifiersKey(list []string) string { return strings.Join(list, ",") }
+
+// GroupClassifierFailure is why group's classifier, model (or its
+// classifiers' ClassifiersKey), couldn't say
 // which intent or effort a turn of that group's was, the last time the
 // group asked it, and when; ok is false once it answers the group, before
 // the group asks it, and after the group's classifier changed. The Routing
@@ -523,8 +553,9 @@ func classifierEffortField(model string) string { return "classifier effort\x00"
 // classifyEffort gives it. An upstream that turns the effort away — a
 // relay that knows no reasoning_effort, one that takes none of the
 // levels — is asked again without it, as before, and from then on: the
-// classifier answers wherever it did.
-func (s *Server) askLeast(ctx context.Context, wait time.Duration, model string, body func(effort string) []byte) (string, error) {
+// classifier answers wherever it did. spare: another classifier is asked
+// should it fail (askChat).
+func (s *Server) askLeast(ctx context.Context, wait time.Duration, spare bool, model string, body func(effort string) []byte) (string, error) {
 	ctx, cancel := context.WithTimeoutCause(ownAsk(ownOperation(ctx)), wait, sideTimedOut{"decision model", wait})
 	defer cancel()
 	effort := classifyEffort(model)
@@ -532,7 +563,7 @@ func (s *Server) askLeast(ctx context.Context, wait time.Duration, model string,
 	if effort != "" && ok && !s.fits(p.ID, classifierEffortField(m), provider.Chat) {
 		effort = ""
 	}
-	a, err := s.askChat(ctx, wait, model, body(effort))
+	a, err := s.askChat(ctx, wait, spare, model, body(effort))
 	var f chatFailed
 	if effort == "" || !errors.As(err, &f) {
 		return a, err
@@ -541,7 +572,17 @@ func (s *Server) askLeast(ctx context.Context, wait time.Duration, model string,
 		return a, err
 	}
 	s.markUnfit(p.ID, classifierEffortField(m), provider.Chat)
-	return s.askChat(ctx, wait, model, body(""))
+	return s.askChat(ctx, wait, spare, model, body(""))
+}
+
+// sparedPatience marks a classifier's call with another classifier after
+// it: serve waits out none of its accounts' rests (askChat).
+type sparedPatience struct{}
+
+// patienceSpared reports whether r is such a call.
+func patienceSpared(r *http.Request) bool {
+	spared, _ := r.Context().Value(sparedPatience{}).(bool)
+	return spared
 }
 
 // chatFailed is a classifier's answer that was an error, with its status
@@ -578,10 +619,22 @@ func (s *Server) askWaited(ctx context.Context) classifier {
 		left := until.Sub(now)
 		mu.Unlock()
 		if left <= 0 {
-			return verdict{}, waitSpent{fmt.Errorf("%s not asked: the request's classifier wait of %s was spent by the routing group above", model, classifyTimeout())}
+			return verdict{}, waitSpent{fmt.Errorf("%s not asked: the request's classifier wait of %s was spent by the routing group above or a classifier before it", model, classifyTimeout())}
 		}
 		defer noteWait(ctx, "decision model")()
-		return s.askClassifierWithContext(access.WithIdentity(ctx, who), left, model, intents, prev, effort, text)
+		if prev.Then <= 0 {
+			return s.askClassifierWithContext(access.WithIdentity(ctx, who), left, model, intents, prev, effort, text)
+		}
+		// others after it: it has the most of what is left, and they the
+		// rest, so one that hangs still leaves the next time to answer
+		part := left * time.Duration(prev.Then+1) / time.Duration(prev.Then+2)
+		v, err := s.askClassifierWithContext(access.WithIdentity(ctx, who), part, model, intents, prev, effort, text)
+		if errors.As(err, new(waitSpent)) && !errors.As(err, new(effortFailed)) && !terminalExtensionError(err) && ctx.Err() == nil {
+			// no answer in its part is its own failure: rested, so the
+			// next turns ask the next one at once, as for a 502
+			err = fmt.Errorf("%s gave no answer in its %s of the request's classifier wait of %s", model, part.Round(time.Millisecond), classifyTimeout())
+		}
+		return v, err
 	}
 	return func(held access.Identity, model string, intents []string, prev before, effort bool, text string) (verdict, error) {
 		who := access.Identity{Accounts: caller.Accounts, Group: caller.Group}.HeldToGroup(held.Group, held.Accounts)
@@ -623,7 +676,7 @@ func (s *Server) askClassifierWithContext(ctx context.Context, wait time.Duratio
 		go func() {
 			defer wg.Done()
 			var a string
-			if a, ierr = s.askLeast(ctx, wait, model, func(effort string) []byte { return classifyBody(model, effort, intents, prev, text) }); ierr == nil {
+			if a, ierr = s.askLeast(ctx, wait, prev.Then > 0, model, func(effort string) []byte { return classifyBody(model, effort, intents, prev, text) }); ierr == nil {
 				v.Intent, v.Said, ierr = readIntent(a, intents)
 			}
 		}()
@@ -633,7 +686,7 @@ func (s *Server) askClassifierWithContext(ctx context.Context, wait time.Duratio
 		go func() {
 			defer wg.Done()
 			var a string
-			if a, eerr = s.askLeast(ctx, wait, model, func(effort string) []byte { return effortBody(model, effort, prev, text) }); eerr == nil {
+			if a, eerr = s.askLeast(ctx, wait, prev.Then > 0, model, func(effort string) []byte { return effortBody(model, effort, prev, text) }); eerr == nil {
 				v.Effort, v.Score, eerr = readEffort(a)
 			}
 		}()
@@ -710,10 +763,15 @@ func readEffort(answer string) (string, float64, error) {
 	return jevLevels[n-1].effort, float64(n - 1), nil
 }
 
-// askChat sends a chat model body through the gateway and returns its
-// answer's text, if it comes in wait.
 // The caller's accounts hold it as heldByGroup holds a request through a group.
-func (s *Server) askChat(ctx context.Context, wait time.Duration, model string, body []byte) (string, error) {
+//
+// spare: another of the group's classifiers is asked should this one
+// fail, so its accounts' rests aren't waited out (sparedPatience): a
+// vendor's 502 or a dropped connection is still tried again in place, as
+// every last route is (passing), and then it is the next one's turn
+// (qinzhidaoa on X: one classifier answering 502 lost every turn's
+// intent).
+func (s *Server) askChat(ctx context.Context, wait time.Duration, spare bool, model string, body []byte) (string, error) {
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://magpie/v1/chat/completions", nil)
 	if err != nil {
 		return "", err
@@ -721,6 +779,9 @@ func (s *Server) askChat(ctx context.Context, wait time.Duration, model string, 
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("User-Agent", RouterAgent)
 	r = r.WithContext(context.WithValue(ctx, callerCtx{}, callerFrom(r)))
+	if spare {
+		r = r.WithContext(context.WithValue(r.Context(), sparedPatience{}, true))
+	}
 	w := httptest.NewRecorder()
 	if err := s.serve(w, r, provider.Chat, body); terminalExtensionError(err) {
 		return "", err

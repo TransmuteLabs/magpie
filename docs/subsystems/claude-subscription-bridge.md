@@ -507,7 +507,20 @@ which is sent the image itself (`unpastedSaid`, `Request.unpasted`,
 `claudePrint` code `unpasted`). An image not taken is kept on the bridge
 for 12 hours (`subscriptionBridge.unpasted`, `unpastedFor`): this
 machine's turns with an image anywhere in their messages start as `-p`
-then, and text alone is still the interactive mode's. When the redo can't
+then, and text alone is still the interactive mode's. A run started as
+`-p` for this (`subscriptionRun.unpasted`, `keepsPrint`) goes on with
+its conversation for as long as it runs: the prompt suggestion asked
+after the turn and the conversation's next turn, taken back from the
+suggestion as in [A side question after a reply](#a-side-question-after-a-reply-1638),
+are told it as `-p`, only their own messages (`resume`). Before, each
+let the run go for a new interactive run told the whole conversation,
+and wrote all of it to the cache again: 268k and 313k tokens on the
+reporter's conversation (#7556, lshen1120;
+`TestClaudeUnpastedPrintRunKeepsItsConversation`). A new conversation
+still starts in the interactive mode, and a `-p` run from before the
+interactive mode was turned on is still let go at its next turn. A
+branch or a retry of such a run's session still goes to the interactive
+mode (#7616). When the redo can't
 run (Off meanwhile, the client gone) the failure is a 400, not a 502
 (`bridgeFailed`), so neither the client nor the fallback asks it again.
 An account Anthropic turned off (its organization disabled, a 400 or
@@ -1967,11 +1980,20 @@ the folder Claude Code runs in is.
 A run's sessions are saved in that folder's project
 (`<config>/projects/<the caller's folder>`), beside the user's own Claude
 Code sessions there when the run is on the user's own sign-in. Claude
-Code's `--resume` picker lists them while they last. That project is never
-swept: only magpie's own folder is (`sweepSessions`). A run's session is
+Code's `--resume` picker lists them while they last. A run's session is
 removed there by its id, when it ends or is discarded (`removeSession`).
-A session that a stopped gateway left there, and its temp files, stay
-there as the user's own sessions do; a sweep can't tell them apart.
+A session a stopped gateway left there is swept as in magpie's own folder,
+but only the runs' (`sweepSessions` with `runsOnly`, known by their ids
+through `bridgesid.Is`); the user's own sessions there are never touched.
+Left there, a stopped gateway's runs piled up in the user's `claude
+--resume` (YZSR on Discord: 12 of a folder's 14 sessions were the runs').
+At the first run a gateway starts, `sweepRunSessions` does the same for
+every project of Claude Code's own folder, so a caller's folder no run
+goes to again is cleared too. A saved account's projects are in its own
+config folder, which the user's `claude --resume` doesn't read; they are
+swept when a run goes there. A run's session in use (a live or idle run,
+the shelf) is still listed while it is kept, up to `idleLongest`, or
+until the account's limit resets. `TestClaudeRunSessionsSweptFromEveryProject`.
 
 Every session a run saves is named by `bridgesid.New`: a new run's
 (`--session-id`, in `-p` and in the interactive mode, whose helper keeps
@@ -1987,8 +2009,8 @@ under the agent that asked was listed and counted again as "Claude Code ·
 Local session", in the request log, the usage ledger, cost totals and
 the Sessions page (iwinux on X). A session saved before 11-14 has a plain
 random id and is still read until it is removed (when its run ends, or
-by the sweep); a stopped gateway's leftover in a caller's folder stays
-until the user removes it. `TestClaudeRunSessionsAreTheBridges`,
+by the sweep); a stopped gateway's leftover from before then in a
+caller's folder stays until the user removes it. `TestClaudeRunSessionsAreTheBridges`,
 `TestClaudeCutSessionIsTheBridges` and `TestBridgeSessionsAreNotLocal`
 hold it.
 
@@ -2000,8 +2022,10 @@ hold it.
   turn](#a-run-that-ended-during-a-turn-6528)), and when a saved session
   is discarded (`removeSession`).
   `sweepSessions` removes those a stopped gateway left in magpie's own
-  work folder's project, once older than `idleLongest` plus a minute; a caller's folder
-  is never swept (`clientWorkDir`).
+  work folder's project, once older than `idleLongest` plus a minute; in
+  a caller's folder (`clientWorkDir`) and, once a gateway, in every
+  project of Claude Code's own folder (`sweepRunSessions`), only the
+  runs' (`bridgesid.Is`).
   A session still in the persisted shelf, the in-memory shelf, an active run,
   or the transfer from shelf to run (`resuming`) is protected. This includes
   quota waits longer than an hour. `loadShelf` removes the file and publishes

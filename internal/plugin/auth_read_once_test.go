@@ -50,7 +50,7 @@ const fs = { ...realFs, readFileSync: (p, ...rest) => {
   }
   return realFs.readFileSync(p, ...rest)
 } }
-const context = vm.createContext({ fs, authPath, Buffer, createHash, structuredClone, Date, scope: { getStore: () => undefined }, toErr: () => {}, send: () => {}, pause: () => {} })
+const context = vm.createContext({ fs, authPath, Buffer, createHash, structuredClone, Date, scope: { getStore: () => undefined }, toErr: () => {}, send: () => {}, pause: () => {}, forgetAccount: () => {}, providerOf: (k) => k.split("#")[0] })
 const run = code => vm.runInContext(code, context)
 run(section('function parseAuth(', 'let authSequence'))
 const past = new Date(Date.now() - 60e3)

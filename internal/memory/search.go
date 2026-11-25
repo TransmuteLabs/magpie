@@ -86,6 +86,11 @@ func Search(q Query) ([]Hit, error) {
 			}
 		}
 		touch(ids, at)
+		d := &Day{Searches: 1, Recalled: len(hits)}
+		if len(hits) > 0 {
+			d.Found = 1
+		}
+		count(d)
 	}
 	return hits, nil
 }

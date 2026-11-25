@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -280,13 +281,20 @@ func listPluginsWith(ctx context.Context, asJSON bool, installed []extensionhost
 		printInstalledExtensions(ctx, installed)
 		return nil
 	}
-	loaded, lerr := plugin.Plugins(ctx)
+	var loaded []plugin.Loaded
+	var ps []plugin.Provider
+	var lerr, perr error
+	if slices.ContainsFunc(l.Plugins, func(e plugin.Entry) bool {
+		return !e.Off && !plugin.InMagpieOnly(plugin.Target(e.Spec))
+	}) {
+		loaded, lerr = plugin.Plugins(ctx)
+		ps, perr = plugin.Providers(ctx)
+	}
 	errs := map[string]string{}
 	for _, p := range loaded {
 		errs[p.Spec] = p.Error
 	}
 	clashes := plugin.Clashes(loaded)
-	ps, perr := plugin.Providers(ctx)
 	mws := middleware.States()
 	var pts []plugin.PluginTools
 	for _, p := range loaded {
@@ -348,6 +356,9 @@ func listPluginsWith(ctx context.Context, asJSON bool, installed []extensionhost
 			if len(w.Panels) > 0 {
 				fmt.Printf("  %s  %s\n", muted.Render("panels"), panelsLine(w))
 			}
+		}
+		if p, _ := plugin.PrivacyModels(plugin.Target(e.Spec)); p != nil {
+			fmt.Println("  " + muted.Render("local privacy models"))
 		}
 		for _, p := range ps {
 			if p.Spec != e.Spec {
@@ -599,6 +610,9 @@ type declaredSwitch struct {
 // from the plugin host when none were listed for it yet (a plugin just
 // added from the command line). A host that can't be asked is none known.
 func declaredSwitches(ctx context.Context, spec string, ask bool) []declaredSwitch {
+	if plugin.InMagpieOnly(plugin.Target(spec)) {
+		return nil
+	}
 	of := func(ps []plugin.Provider) (out []declaredSwitch, listed bool) {
 		for _, p := range ps {
 			if p.Spec != spec {

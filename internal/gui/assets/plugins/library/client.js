@@ -306,10 +306,13 @@ magpie.plugin("library", (ctx) => {
     }
   });
   function handGap(box, w) {
-    const n = box._n || 1;
-    // outside -19px to 3px the CSS clamps it the same, so nothing is set
-    const gap = Math.min(3, Math.max(-19, Math.round((0.48 * w - 60 - n * 24) / Math.max(1, n - 1)))) + "px";
-    if (box.style.getPropertyValue("--lib-gap") !== gap) box.style.setProperty("--lib-gap", gap);
+    const setGap = (property, count) => {
+      const gap = Math.min(3, Math.max(-19, Math.round((0.48 * w - 60 - count * 24) / Math.max(1, count - 1)))) + "px";
+      if (box.style.getPropertyValue(property) !== gap) box.style.setProperty(property, gap);
+    };
+    setGap("--lib-gap", box._n || 1);
+    const columns = box.parentElement.parentElement?._mcpAgentCount;
+    if (columns) setGap("--lib-mcp-gap", columns);
   }
   function handRoom(row, box, n) {
     box._n = n;
@@ -1086,6 +1089,12 @@ magpie.plugin("library", (ctx) => {
     if (lib) back.title = t("magpie keeps a copy of every file before it writes it.") + "\n" + tilde(lib.backups);
     else back.disabled = true;
     acts.append(more, back);
+    // Artifacts' way in where the header's row has no tab for it (markNav)
+    const art = button("", "lib-toart", () => window.show("artifacts"));
+    art.title = t("Artifacts");
+    art.append(glyph(GLYPH.doc, "lib-mini"), el("span", "", t("Artifacts")));
+    art.setAttribute("aria-label", t("Artifacts"));
+    acts.prepend(art);
     head.append(acts);
     return head;
   }
@@ -1292,6 +1301,7 @@ magpie.plugin("library", (ctx) => {
       body.append(skeleton("memory").lastChild);
       return;
     }
+    body.append(memStats());
     const card = el("div", "list lib-list lib-memcard");
     const row = el("div", "row lib-row lib-memdigest");
     const who = el("div", "who");
@@ -1360,6 +1370,20 @@ magpie.plugin("library", (ctx) => {
     }
     body.append(list);
     if (memPicking) body.append(memPickBar());
+  }
+
+  // the tab's numbers and trend (memstats.js), imported the first time
+  // the tab draws; until then a place of the card's height holds the page
+  // still
+  let memStatsAsked = false;
+  function memStats() {
+    if (window.memStatsCard) return window.memStatsCard(mem);
+    const hold = el("div", "lib-memstats-hold");
+    if (!memStatsAsked) {
+      memStatsAsked = true;
+      import(new URL("plugins/library/memstats.js", document.baseURI).href).then(() => tab === "memory" && render(), () => { memStatsAsked = false; });
+    }
+    return hold;
   }
 
   // what memory suggests (memory.Suggest): a memory learned in several
@@ -2299,6 +2323,20 @@ magpie.plugin("library", (ctx) => {
         who.append(origin);
         row.append(glyph(GLYPH[{ mcp: "web", hook: "cmd", subagent: "subagent" }[kind] || "skill"]), who);
         if (p.enabled === false) row.append(tag(t("Off in {agent}", { agent: p.agentName }), "warn", t("{agent}'s own settings turn this plugin off", { agent: p.agentName })));
+        // a project's .codex/config.toml turning it on or off (#7244),
+        // which Codex applies once the project is trusted; loading stays
+        // unknown
+        for (const pr of p.inProjects || []) {
+          const project = pr.dir.split(/[\\/]/).filter(Boolean).pop() || pr.dir;
+          const on = pr.effective === true;
+          const why = pr.trusted ? t("Set in {project}'s .codex/config.toml. Whether a session loaded it is unknown.", { project })
+            : pr.set ? t("{project}'s .codex/config.toml turns it on, used once Codex trusts the project.", { project })
+            : t("{project}'s .codex/config.toml turns it off, used once Codex trusts the project.", { project });
+          const x = tag(on ? t("On in {project}", { project }) : t("Off in {project}", { project }), on ? "" : "warn", why);
+          x.classList.add("lib-nativeproj");
+          x.dataset.project = pr.dir;
+          row.append(x);
+        }
         rows.push(row);
       }
     }
@@ -3059,8 +3097,15 @@ magpie.plugin("library", (ctx) => {
       // in the order the reader picked (#481), A→Z till then
       const fill = () => {
         const sorted = [...lib.servers].sort(byName(sortOf("libServers")));
-        list.replaceChildren(...sorted.filter((s) => !s.hidden).map((s) => serverRow(s, all)));
-        offList.replaceChildren(...sorted.filter((s) => s.hidden).map((s) => serverRow(s, all)));
+        for (const [section, hidden] of [[list, false], [offList, true]]) {
+          const rows = sorted.filter((server) => !!server.hidden === hidden).map((server) => serverRow(server, all));
+          section._mcpAgentCount = rows.reduce((count, row) => {
+            const chips = row.querySelector(":scope > .lib-agents");
+            return Math.max(count, Number(chips?.style.getPropertyValue("--lib-agent-count") || 0));
+          }, 0);
+          section.style.setProperty("--lib-mcp-count", section._mcpAgentCount);
+          section.replaceChildren(...rows);
+        }
         syncFold();
       };
       // one heading over the list, with what the skills' has (#1027): the
@@ -4572,11 +4617,23 @@ magpie.plugin("library", (ctx) => {
     // server the check found won't start in home, where magpie runs it for
     // Codex too (inHome)
     d.hub = d.hub === "direct" ? "direct" : "";
+    // the Keep running row follows the kind of server (draw)
+    let drawKeep = () => {};
     if (lib.mcpHub || (s && health.get(s.name)?.h?.why === "home")) {
       const hubBox = el("div", "lib-hubbox");
-      const drawHub = () => hubBox.replaceChildren(toggle(d.hub !== "direct", t("Through the MCP router"), (on) => { d.hub = on ? "" : "direct"; drawHub(); }));
+      // a command the router runs is ended after 10 minutes unused; kept
+      // running, it lives until magpie quits (MasterYi on Discord: a
+      // server whose browser asks to allow each new connection)
+      const keepBox = el("div", "lib-keepbox");
+      const keepRow = field(t("Keep running"), keepBox, t("On keeps it running until magpie quits, for a server that asks you to allow each new connection. Off ends it after 10 minutes unused"));
+      const drawHub = () => {
+        hubBox.replaceChildren(toggle(d.hub !== "direct", t("Through the MCP router"), (on) => { d.hub = on ? "" : "direct"; drawHub(); }));
+        keepBox.replaceChildren(toggle(!!d.keepAlive, t("Keep running"), (on) => { d.keepAlive = on; drawHub(); }));
+        for (const n of keepRow) n.hidden = !lib.mcpHub || d.hub === "direct" || d.transport !== "stdio";
+      };
       drawHub();
-      ed.append(...field(t("Through the MCP router"), hubBox, t("Off gives each agent its own entry for it, as with the router off: for a server that reads its project from the folder it starts in, or keeps a session's state")));
+      drawKeep = drawHub;
+      ed.append(...field(t("Through the MCP router"), hubBox, t("Off gives each agent its own entry for it, as with the router off: for a server that reads its project from the folder it starts in, or keeps a session's state")), ...keepRow);
     }
     ed.append(err);
 
@@ -4624,6 +4681,7 @@ magpie.plugin("library", (ctx) => {
     }
     function draw() {
       slot.replaceChildren();
+      drawKeep();
       if (view === "json") {
         signBox = appBox = null;
         top.replaceChildren(...field("JSON", jsonBox(), t("As Claude Code's .mcp.json has it. A value naming a variable, as {ref}, stays a name here", { ref: "${NAME}" })));
@@ -4703,7 +4761,7 @@ magpie.plugin("library", (ctx) => {
     // send saves the form; s is then the server as saved, for a save after
     // a sign-in's to be of it
     const send = async () => {
-      const body = { old: s ? s.name : "", server: { name: d.name, transport: d.transport, agents: d.agents, startupTimeout: d.startupTimeout || 0, local: !!d.local, hub: d.hub || "", note: d.note || "" } };
+      const body = { old: s ? s.name : "", server: { name: d.name, transport: d.transport, agents: d.agents, startupTimeout: d.startupTimeout || 0, idleTimeout: d.idleTimeout || 0, keepAlive: !!d.keepAlive, local: !!d.local, hub: d.hub || "", note: d.note || "" } };
       if (d.transport === "stdio") Object.assign(body.server, { command: d.command, args: d.args, env: d.env, shared: d.local ? null : d.shared || null });
       else Object.assign(body.server, { url: d.url, headers: d.headers, oauth: d.transport === "http" && d.oauth?.clientId ? d.oauth : null });
       take(await api("library/servers/save", body));
@@ -6114,6 +6172,9 @@ magpie.plugin("library", (ctx) => {
     return row;
   }
 
+  // a git source's tag pin, as library/plugin_tags.go reads it
+  const PINNED_TAG = /\/(?:tree|blob|-\/tree|-\/blob|src\/tag|src\/branch)\/v?\d+(?:\.\d+){0,3}(?:[/?#]|$)/;
+
   function pluginDetail(p) {
     const ed = el("div", "editor lib-editor lib-pldetail");
     const head = el("div", "ehead");
@@ -6144,6 +6205,21 @@ magpie.plugin("library", (ctx) => {
     }));
     bar.append(button(t("Cancel"), "", closeLibModal));
     ed.append(bar);
+    // pinned to a release tag (#7549): Update fetches that tag again, so
+    // the repository's newer stable tags are asked for and offered
+    if (PINNED_TAG.test(p.source || "")) {
+      const pin = el("div", "lib-plpin");
+      ed.insertBefore(pin, bar);
+      api("library/plugin-tags?name=" + encodeURIComponent(p.name)).then((r) => {
+        if (!r?.pin) return;
+        pin.append(el("div", "hint", (r.newer || []).length ? t("Pinned to {tag}. Newer releases:", { tag: r.pin }) : t("Pinned to {tag}, the newest release.", { tag: r.pin })));
+        const row = el("div", "lib-plpintags");
+        for (const tag of (r.newer || []).slice(0, 4)) row.append(button(t("Update to {tag}", { tag }), "lib-btn", async () => {
+          if (await change("plugins/upgrade", { name: p.name, tag }, t("{name} is at {tag} now", { name: p.name, tag }))) closeLibModal(true);
+        }));
+        if (row.childNodes.length) pin.append(row);
+      }).catch(() => {}); // the tags unknown: nothing offered, Update still is
+    }
     modal = { dirty: () => false };
     openLib(ed);
   }
@@ -7479,6 +7555,7 @@ magpie.plugin("library", (ctx) => {
     card.append(head);
     if (p.problems?.[""]) card.append(el("div", "lib-err", p.problems[""]));
     if (!isOpen) return card;
+    projectMainOnly(p, card);
     if (mcp) return projectOwn(p, "servers", projectServers(p, card));
     if (sub) return projectOwn(p, "subagents", projectSubagents(p, card));
     if (plg) return projectPlugins(p, card);
@@ -7826,6 +7903,26 @@ magpie.plugin("library", (ctx) => {
     return card;
   }
 
+  // A project in a git repository with other worktrees: they follow it,
+  // unless it is kept to this checkout (#7252). Shown on every tab, since
+  // it holds for everything the project has.
+  function projectMainOnly(p, card) {
+    const n = p.trees?.length || 0;
+    if (!n && !p.mainOnly) return;
+    const opts = el("div", "lib-projopts lib-projmain");
+    const say = t("Only this checkout");
+    const sw = toggle(!!p.mainOnly, say, (on) =>
+      change("projects/main-only", { dir: p.dir, on }, on ? t("{name} is kept to this checkout", { name: p.name }) : t("{name}'s worktrees follow it again", { name: p.name })));
+    const lab = el("label", "lib-projcopy");
+    const words = el("span", "", say);
+    words.onclick = (e) => { e.preventDefault(); sw.click(); };
+    lab.append(sw, words);
+    opts.append(lab, el("span", "note", p.mainOnly
+      ? t("The repository's other worktrees get none of what this project has.")
+      : n === 1 ? t("The repository's other worktree gets what this project has.") : t("The repository's {n} other worktrees get what this project has.", { n })));
+    card.append(opts);
+  }
+
   // A project's Pi packages (#7249): the entries of its .pi/settings.json,
   // each on, off (kept, loading nothing) or removed, and those the project
   // declares itself, left as written until adopted.
@@ -7851,6 +7948,18 @@ magpie.plugin("library", (ctx) => {
       rm.append(svg(GLYPH.trash, 13, 1.4));
       rm.title = t("Remove");
       row.append(glyph(GLYPH.folder), w, sw, rm);
+      box.append(row);
+    }
+    // what another build kept in the project's pi that magpie has no
+    // place for (#7282): shown, never written
+    for (const x of p.piNotCarried || []) {
+      const row = el("div", "row lib-row lib-projskill lib-projownrow lib-projpileft");
+      row.dataset.source = x.source;
+      const w = el("div", "who");
+      const n = el("div", "name mono", x.source);
+      n.append(tag(t("Not carried"), "", t("Another build kept this Pi extension for the project. magpie writes nothing for it; a line for it in .pi/settings.json stays as it is.")));
+      w.append(n);
+      row.append(glyph(GLYPH.folder), w);
       box.append(row);
     }
     for (const o of p.own?.pi || []) {
@@ -10408,6 +10517,9 @@ magpie.plugin("library", (ctx) => {
   }
 
   ctx.onConfig(() => { if (lib && page && !page.hidden) render(); });
+
+  // Work › Artifacts, the pages agents made (artifacts.js)
+  ctx.slots.add("page", artifactsPage());
 
   ctx.slots.add("page", {
     key: "library",

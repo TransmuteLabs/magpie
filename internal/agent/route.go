@@ -435,7 +435,12 @@ func buildModels(agent string) []catalog.Model {
 			modelMembers = members(e.ID)
 		}
 		api, endpoints := provider.AgentModelProtocols(e, modelMembers)
-		if api != "" {
+		if e.Group == "" && e.Provider.AgentGemini(e.Model) {
+			m.APIs = []string{string(provider.Gemini)}
+			if api != "" && api != provider.Gemini {
+				m.APIs = append(m.APIs, string(api))
+			}
+		} else if api != "" {
 			m.APIs = []string{string(api)}
 		}
 		m.Endpoints = endpoints

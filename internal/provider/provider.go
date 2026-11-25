@@ -76,10 +76,14 @@ type Provider struct {
 	// tells Token Plan 企业版's usage to (tencent_usage.go), or an Alibaba
 	// Cloud account's AccessKey ID and Secret (TakesAlibabaAccessKey), what
 	// its console tells a Token Plan's usage to (alibaba_usage.go); not the plan's
-	// inference key in Key. They are kept, backed up and synced as the keys are: the Secret
-	// is never sent to the GUI, and a backup without keys has neither.
+	// inference key in Key. On Amazon Bedrock they are an AWS access key,
+	// which signs its requests (SigV4) in place of a Bedrock API key
+	// (SignsWithAccessKey, #7687), with SessionToken a temporary one's.
+	// They are kept, backed up and synced as the keys are: the Secret and
+	// the token are never sent to the GUI, and a backup without keys has none.
 	AccessKeyID     string `json:"accessKeyID,omitempty"`
 	SecretAccessKey string `json:"secretAccessKey,omitempty"`
+	SessionToken    string `json:"sessionToken,omitempty"`
 
 	// KeyName names the key in use, and Keys are the provider's other
 	// accounts: keys saved to switch to (see keys.go).
@@ -1051,6 +1055,17 @@ func AllContext(ctx context.Context) []Provider {
 	return providers
 }
 
+// IDsContext lists every configured provider's ID for ctx without cloning
+// credentials, and reports whether the inventory is complete.
+func IDsContext(ctx context.Context) ([]string, bool) {
+	inventory := sharedProviderInventoryContext(ctx)
+	ids := make([]string, len(inventory.providers))
+	for i, p := range inventory.providers {
+		ids[i] = p.ID
+	}
+	return ids, inventory.complete
+}
+
 func allWithStatusContext(ctx context.Context) ([]Provider, bool) {
 	inventory := sharedProviderInventoryContext(ctx)
 	out := make([]Provider, len(inventory.providers))
@@ -1707,6 +1722,9 @@ func AddCopy(p Provider, from string) (string, error) {
 	// but never the saved Secret, which went missing from the copy (#1821)
 	if p.SecretAccessKey == "" && (p.AccessKeyID == "" || p.AccessKeyID == src.AccessKeyID) {
 		p.AccessKeyID, p.SecretAccessKey = src.AccessKeyID, src.SecretAccessKey
+		if p.SessionToken == "" {
+			p.SessionToken = src.SessionToken
+		}
 	}
 	if p.ZhipuTeam == nil {
 		p.ZhipuTeam = src.ZhipuTeam
@@ -1952,6 +1970,10 @@ func Delete(id string) error {
 // saved by hand, while the same server at 127.0.0.1 could.
 func keyOptional(p Provider) bool {
 	if pr := Preset(p.Preset); pr != nil && pr.NoKey {
+		return true
+	}
+	// Bedrock signed with an AWS access key in place of its API key (#7687)
+	if p.SignsWithAccessKey() {
 		return true
 	}
 	h := p.Host()

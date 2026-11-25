@@ -275,6 +275,7 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 		qs = provider.InProviderOrderContext(ctx, qs)
 		qs = usage.WithWindowHoldsContext(ctx, qs, now)
 		qs = provider.WithWindowStarts(qs, now)
+		qs = provider.WithWindowPeriods(qs)
 		qs = provider.WithHeldWindows(qs, now)
 		qs = provider.ValidateSubscriptionQuotas(ctx, withTrayKinds(qs))
 		if r.Context().Err() != nil {

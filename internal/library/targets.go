@@ -33,8 +33,14 @@ type Target struct {
 	// Field, when it is set, says the instructions are not the file itself
 	// but the string at this key path of the JSON file Instructions names
 	// (WorkBuddy's personalization.customPrompt): instr_field.go.
-	Field  string
-	MCP    *mcpFile
+	Field string
+	MCP   *mcpFile
+	// MCP2 is a second MCP file for an agent that runs more than one
+	// runtime, each reading its own format: Cindy's Pi reads
+	// pi-agent-home/mcp.json (fmtPiNative) beside its Codex config.toml.
+	// syncMCP2 writes the same servers there, tracked by the applied list
+	// MCP shares.
+	MCP2   *mcpFile
 	Skills string // the folder the agent finds skills in
 	// SkillsAlso are agents whose skills this one reads as well, as
 	// OpenCode reads Claude Code's.
@@ -373,8 +379,27 @@ func targetOf(a *agent.Agent) *Target {
 		t.MCP = &mcpFile{Path: filepath.Join(h, ".config", "alma", "mcp.json"), Format: fmtAlma}
 		t.SkillsAlso = []string{"claude", "codex"}
 	case "cindy":
-		// Cindy keeps its user-wide skills in ~/.agents/skills
+		// Cindy keeps its user-wide skills in ~/.agents/skills. Its Codex
+		// runs with CODEX_HOME at codex-home in its data folder
+		// (getDesktopCodexHome, getAuthEnv in Cindy 0.1.94's app.asar),
+		// and copies only plugin entries into that config.toml from
+		// ~/.codex's, so Codex's servers never reached a Codex session in
+		// Cindy (sunset on Discord): its [mcp_servers] there are its own.
+		// Cindy's own block in it (cindy-remote-mcp) is written only into
+		// remote hosts' configs. Its Claude Code reads the user's
+		// ~/.claude.json, Claude Code's own; a ChatGPT account added in
+		// Cindy runs Codex in a home of its own (codex-accounts), not given.
 		t.Skills = sharedSkillsDir()
+		if a.Dir != "" {
+			t.MCP = &mcpFile{Path: filepath.Join(a.Dir, "codex-home", "config.toml"), Format: fmtCodex}
+			// Cindy's Pi runs with PI_CODING_AGENT_DIR at pi-agent-home in
+			// the same folder (reconcilePiDurableRuns, the CINDY_PI_API_KEY
+			// env block in Cindy 0.1.94's app.asar); native Pi reads its
+			// servers from mcp.json there (pimcp.go), its own JSON shape, so
+			// the Codex-only write never reached a Cindy Pi session, Cindy's
+			// default runtime (POM_JUMPING on X, v0.1.4777).
+			t.MCP2 = &mcpFile{Path: filepath.Join(a.Dir, "pi-agent-home", "mcp.json"), Format: fmtPiNative}
+		}
 	case "craft-agents":
 		// Craft Agents reads user-wide skills from ~/.agents/skills
 		// (skills/storage.ts, GLOBAL_AGENT_SKILLS_DIR) beside its

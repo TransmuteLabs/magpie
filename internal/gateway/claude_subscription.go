@@ -244,6 +244,13 @@ type subscriptionRun struct {
 	cacheTail   string
 	cachePrefix cachePrefix
 	timer       *time.Timer
+	// unpasted: it is claude -p because the interactive mode didn't take a
+	// message of its conversation (unpastedCode, set as it starts). Its
+	// conversation's next turns, and the side questions between them, go
+	// on in it as -p for as long as it runs (keepsPrint): switching each
+	// to a new interactive run told the whole conversation wrote all of it
+	// to the cache again (#7556, lshen1120)
+	unpasted bool
 
 	// Claude Code's input, kept open for the next turn; owner is the account
 	// it runs as (owned, named once in its life when it started unnamed:
@@ -1049,6 +1056,7 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 		go func() {
 			sweepBridgeProjects(claudeConfigDir(), os.TempDir())
 			sweepBridgeTemps(os.TempDir())
+			b.sweepRunSessions(claudeConfigDir())
 		}()
 	})
 	tmp, err := os.MkdirTemp("", "magpie-claude-")
@@ -1138,10 +1146,8 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 		sessions = claudeSessions(configDir, work)
 		args = slices.DeleteFunc(args, func(a string) bool { return a == "--no-session-persistence" })
 		// a caller's folder keeps its own sessions beside the runs': only
-		// magpie's own folder is swept, a run's session removed by its id
-		if !client {
-			b.sweepSessions(sessions)
-		}
+		// the runs' are swept there, known by their ids (bridgesid)
+		b.sweepSessions(sessions, client)
 	}
 	// kept is the session from was, for startTrusted to go on with in
 	// magpie's folder when Claude Code asks about the caller's
@@ -1406,6 +1412,7 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 	run.lean = req.leanPrompt
 	run.appended = req.appendPrompt
 	run.tui = tui
+	run.unpasted = !tui && code == unpastedCode
 	run.cachePrefix = prefix
 	if tui {
 		run.safeguards = bytes.Clone(req.Safeguards)
@@ -2057,10 +2064,16 @@ func (b *subscriptionBridge) resume(ctx context.Context, req *Request, owner str
 		return nil, nil
 	}
 	if !run.tui && wantTUI(req) {
-		// a -p run from before the interactive mode was turned on goes
-		// on with no turn more
-		run.abortFor("Claude Code's interactive mode is on, and this run is -p")
-		return nil, nil
+		if !run.keepsPrint() {
+			// a -p run from before the interactive mode was turned on goes
+			// on with no turn more
+			run.abortFor("Claude Code's interactive mode is on, and this run is -p")
+			return nil, nil
+		}
+		// a -p run started for a message the interactive mode didn't
+		// take goes on with its conversation's turns, its cache read
+		asUnpasted(req)
+		log.Printf("claude: the conversation's next turn goes on in its claude -p run, started for a message the interactive mode didn't take")
 	}
 	req.clientCache.selected(false)
 	if run.tui && back != "" && urlImages(since) == 0 {
@@ -3597,45 +3610,81 @@ func untouchedFor(path string, age time.Duration) bool {
 // folders, the sessions a gateway that stopped or crashed left there:
 // those untouched for longer than one would be kept. Another gateway on
 // the same account (a dev build) works in the same folder; its sessions
-// are newer.
-func (b *subscriptionBridge) sweepSessions(dirs []string) {
+// are newer. In a caller's folder (runsOnly) the user's own Claude Code
+// saves its sessions too, so only the runs' go, known by their ids
+// (bridgesid): left there, each was listed in the user's `claude
+// --resume` beside their own (YZSR on Discord: 12 of a folder's 14).
+func (b *subscriptionBridge) sweepSessions(dirs []string, runsOnly bool) {
 	for _, dir := range dirs {
 		if _, done := b.swept.LoadOrStore(dir, true); done {
 			continue
 		}
 		go func() {
 			kept, known := b.keptSessions()
-			if !known {
-				return
-			}
-			entries, _ := os.ReadDir(dir)
-			for _, e := range entries {
-				sid, ok := strings.CutSuffix(e.Name(), ".jsonl")
-				if !ok || e.IsDir() || kept[filepath.Join(dir, e.Name())] {
-					continue
-				}
-				if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > idleLongest+time.Minute {
-					removeSession([]string{dir}, sid)
-				}
-			}
-			tmp := claudeTempDir(dir)
-			if tmp == "" {
-				return
-			}
-			entries, _ = os.ReadDir(tmp)
-			for _, e := range entries {
-				sid := e.Name()
-				if !e.IsDir() || strings.HasPrefix(sid, ".") {
-					continue
-				}
-				if _, err := os.Stat(filepath.Join(dir, sid+".jsonl")); err == nil {
-					continue
-				}
-				if untouchedFor(filepath.Join(tmp, sid), tempLongest) {
-					_ = os.RemoveAll(filepath.Join(tmp, sid))
-				}
+			if known {
+				sweepSessionDir(dir, kept, runsOnly)
 			}
 		}()
+	}
+}
+
+// sweepRunSessions sweeps the runs' sessions from every project of
+// Claude Code's folder configDir, once a gateway: a caller's folder no
+// run goes to again keeps what a stopped gateway left there otherwise.
+// Only the runs' are touched (runsOnly), and the folders sweepSessions
+// went through are left to it.
+func (b *subscriptionBridge) sweepRunSessions(configDir string) {
+	root := filepath.Join(configDir, "projects")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	kept, known := b.keptSessions()
+	if !known {
+		return
+	}
+	for _, e := range entries {
+		dir := filepath.Join(root, e.Name())
+		if !e.IsDir() {
+			continue
+		}
+		if _, done := b.swept.Load(dir); done {
+			continue
+		}
+		sweepSessionDir(dir, kept, true)
+	}
+}
+
+// sweepSessionDir removes from project folder dir the sessions untouched
+// for longer than one is kept, and the temp files of those gone, but for
+// those in kept; with runsOnly, only the runs' sessions (bridgesid.Is).
+func sweepSessionDir(dir string, kept map[string]bool, runsOnly bool) {
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		sid, ok := strings.CutSuffix(e.Name(), ".jsonl")
+		if !ok || e.IsDir() || kept[filepath.Join(dir, e.Name())] || runsOnly && !bridgesid.Is(sid) {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > idleLongest+time.Minute {
+			removeSession([]string{dir}, sid)
+		}
+	}
+	tmp := claudeTempDir(dir)
+	if tmp == "" {
+		return
+	}
+	entries, _ = os.ReadDir(tmp)
+	for _, e := range entries {
+		sid := e.Name()
+		if !e.IsDir() || strings.HasPrefix(sid, ".") || runsOnly && !bridgesid.Is(sid) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, sid+".jsonl")); err == nil {
+			continue
+		}
+		if untouchedFor(filepath.Join(tmp, sid), tempLongest) {
+			_ = os.RemoveAll(filepath.Join(tmp, sid))
+		}
 	}
 }
 
@@ -7528,10 +7577,7 @@ func (s *Server) serveSubscriptionAs(w http.ResponseWriter, r *http.Request, fro
 	// Windows 10 LTSC, every image turn a 502 the client asked again)
 	if name == "Claude Code" && claudeTUIOn() && !req.tuiRefused &&
 		(redo == unpastedCode || countImages(req.Messages) > 0 && s.subscription.imagesUnpasted()) {
-		req.unpasted = true
-		if req.clientCache != nil {
-			req.clientCache.print = true
-		}
+		asUnpasted(req)
 	}
 	if name == "Claude Code" && claudeTUIOn() && !req.tuiRefused && !req.unpasted && keptByPrint(req) {
 		// the classifier's marks keep more than its fresh interactive
@@ -7965,6 +8011,21 @@ func redoable(r *http.Request, name string, req *Request, code int, msg string) 
 // (claudetui.Unpastable).
 func unpastedSaid(name, msg string) bool {
 	return name == "Claude Code" && strings.Contains(msg, claudetui.Unpastable)
+}
+
+// asUnpasted makes req's run claude -p for a message the interactive mode
+// didn't take (unpastedCode).
+func asUnpasted(req *Request) {
+	req.unpasted = true
+	if req.clientCache != nil {
+		req.clientCache.print = true
+	}
+}
+
+// keepsPrint is whether the run is claude -p for a message the interactive
+// mode didn't take, and so goes on with its conversation's turns as -p.
+func (r *subscriptionRun) keepsPrint() bool {
+	return !r.tui && r.unpasted
 }
 
 // unpastedCode is claudePrint's code for a run that is claude -p because
