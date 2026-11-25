@@ -40,7 +40,8 @@ import (
 // HTTP one, and a key turned off ends the next turn, not the socket.
 //
 // The conversation a turn continues is the socket's own: each reply's
-// input and output, kept for the socket's life (Codex says store false on
+// input and output, kept while the socket is active and dropped after
+// responsesSocketTurnIdle idle (Codex says store false on
 // every request, and OpenAI's socket keeps the last response for the
 // connection all the same). A turn naming one is given the conversation
 // whole before it is sent, so what serves it, a provider or another
@@ -88,6 +89,10 @@ const (
 	socketOverflowGrace = time.Second
 	socketWriteTimeout  = time.Minute
 )
+
+// responsesSocketTurnIdle is how long an idle socket keeps its held turn
+// history and turn state while no turn is in flight.
+var responsesSocketTurnIdle = 15 * time.Minute
 
 // clientSockets are the sockets being served, which end with the gateway.
 type clientSockets struct {
@@ -307,18 +312,39 @@ func (rs *responsesSocket) serve(queueLimit int) {
 	}()
 	var queued []socketMsg
 	var queuedBytes int
+	var idleTimer *time.Timer
+	var idleC <-chan time.Time
+	stopIdle := func() {
+		if idleTimer != nil {
+			idleTimer.Stop()
+			idleTimer = nil
+			idleC = nil
+		}
+	}
+	defer stopIdle()
+	defer rs.dropTurns()
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		var m socketMsg
 		if len(queued) > 0 {
+			stopIdle()
 			m = queued[0]
 			queuedBytes -= cap(m.data)
 			queued = slices.Delete(queued, 0, 1)
 		} else {
+			if idleTimer == nil && responsesSocketTurnIdle > 0 && (len(rs.turns) > 0 || rs.stateTurn != "") {
+				idleTimer = time.NewTimer(responsesSocketTurnIdle)
+				idleC = idleTimer.C
+			}
 			select {
 			case m = <-in:
+				stopIdle()
+			case <-idleC:
+				stopIdle()
+				rs.dropTurns()
+				continue
 			case <-ctx.Done():
 				return
 			}
@@ -481,6 +507,15 @@ func (rs *responsesSocket) held(id string) (heldTurn, bool) {
 		}
 	}
 	return heldTurn{}, false
+}
+
+func (rs *responsesSocket) dropTurns() {
+	rs.mu.Lock()
+	clear(rs.turns)
+	rs.turns = nil
+	rs.stateTurn = ""
+	rs.turnState = ""
+	rs.mu.Unlock()
 }
 
 // keep holds the reply id ends: the conversation before this turn (held

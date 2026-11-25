@@ -960,6 +960,205 @@ func TestResponsesSocketReleasesOutputEnvelopesAfterInterrupt(t *testing.T) {
 	})
 }
 
+func TestResponsesSocketEvictsIdleHeldTurns(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		idle := responsesSocketTurnIdle
+		if idle != 15*time.Minute {
+			t.Fatalf("responsesSocketTurnIdle = %v, want 15m", idle)
+		}
+		itemOf := func(id, text string) string {
+			return `{"type":"message","id":"` + id + `","role":"assistant","status":"completed","content":[{"type":"output_text","text":"` + text + `"}]}`
+		}
+		item1 := itemOf("msg_idle_1", "first")
+		item2 := itemOf("msg_idle_2", "second")
+		item3 := itemOf("msg_idle_3", "third")
+		frameWithMeta := func(prev, input, turnID string) string {
+			extra := `"client_metadata":{"turn_id":"` + turnID + `"},`
+			if prev != "" {
+				extra += `"previous_response_id":"` + prev + `",`
+			}
+			return `{"type":"response.create","model":"gpt-5.5",` + extra + `"input":[` + input + `]}`
+		}
+
+		probes := make(chan weak.Pointer[byte], 4)
+		sendItem := func(writer *socketTurnWriter, item string) error {
+			event := []byte(`{"type":"response.output_item.done","output_index":0,"item":` + item + `}`)
+			if err := writer.event(event); err != nil {
+				return err
+			}
+			if len(writer.items) != 1 || string(writer.items[0]) != item {
+				return errors.New("output item was not decoded")
+			}
+			probes <- weak.Make(&writer.items[0][0])
+			return nil
+		}
+		readProbe := func() weak.Pointer[byte] {
+			t.Helper()
+			select {
+			case probe := <-probes:
+				return probe
+			default:
+				t.Fatal("missing output item probe")
+				return weak.Pointer[byte]{}
+			}
+		}
+
+		var (
+			mu         sync.Mutex
+			requests   [][]string
+			turnStates []string
+		)
+		releaseSlow := make(chan struct{})
+		via := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Errorf("read synthetic request: %v", err)
+				return
+			}
+			var items []string
+			for _, item := range gjson.GetBytes(body, "input").Array() {
+				items = append(items, strings.Clone(item.Raw))
+			}
+			mu.Lock()
+			requests = append(requests, items)
+			turnStates = append(turnStates, request.Header.Get("X-Codex-Turn-State"))
+			step := len(requests)
+			mu.Unlock()
+
+			id, item, nextState := "resp_fresh", "", ""
+			switch step {
+			case 1:
+				id, item, nextState = "resp_1", item1, "state-1"
+			case 2:
+				id, item, nextState = "resp_2", item2, "state-2"
+			case 3:
+				id, item = "resp_3", item3
+			}
+			writer := response.(*socketTurnWriter)
+			writer.Header().Set("Content-Type", "text/event-stream")
+			if nextState != "" {
+				writer.Header().Set("X-Codex-Turn-State", nextState)
+			}
+			writer.WriteHeader(http.StatusOK)
+			if err := writer.event([]byte(`{"type":"response.created","response":{"id":"` + id + `"}}`)); err != nil {
+				t.Errorf("send created: %v", err)
+				return
+			}
+			if step == 2 {
+				<-releaseSlow
+			}
+			if item != "" {
+				if err := sendItem(writer, item); err != nil {
+					t.Errorf("send output item: %v", err)
+					return
+				}
+			}
+			if err := writer.event([]byte(`{"type":"response.completed","response":{"id":"` + id + `","status":"completed","output":[]}}`)); err != nil {
+				t.Errorf("send completed: %v", err)
+			}
+		})
+
+		peer, conn, upgrade := dialPipeResponsesSocket(t)
+		peer.SetReadLimit(1 << 20)
+		socket := responsesSocket{c: conn, ctx: t.Context(), path: upgrade.URL.Path, o: &socketOrigin{req: upgrade, via: via}}
+		served := make(chan struct{})
+		go func() {
+			defer close(served)
+			socket.serve(socketQueueBytes)
+		}()
+		defer func() {
+			peer.CloseNow()
+			<-served
+		}()
+
+		client := &sockClient{t: t, c: peer}
+		if end := last(client.turn(frameWithMeta("", userHi, "turn-1"))); end.Get("type").String() != "response.completed" || end.Get("response.id").String() != "resp_1" {
+			t.Fatalf("turn 1 did not complete: %s", end.Raw)
+		}
+		synctest.Wait()
+		probe1 := readProbe()
+		runtime.GC()
+		if probe1.Value() == nil {
+			t.Fatal("turn 1 item was collected before idle timeout")
+		}
+
+		time.Sleep(idle - time.Minute)
+		synctest.Wait()
+		runtime.GC()
+		if probe1.Value() == nil {
+			t.Fatal("turn 1 item was evicted before idle timeout elapsed")
+		}
+
+		client.send(frameWithMeta("resp_1", userMore, "turn-1"))
+		if events, err := client.until("response.created", "error"); err != nil || last(events).Get("type").String() != "response.created" {
+			t.Fatalf("turn 2 did not start: %v, %v", events, err)
+		}
+		time.Sleep(idle + time.Minute)
+		synctest.Wait()
+		runtime.GC()
+		if probe1.Value() == nil {
+			t.Fatal("turn 1 item was evicted while turn 2 was in flight")
+		}
+		close(releaseSlow)
+		if events, err := client.until("response.completed", "error"); err != nil || last(events).Get("response.id").String() != "resp_2" {
+			t.Fatalf("turn 2 did not complete: %v, %v", events, err)
+		}
+		synctest.Wait()
+		probe2 := readProbe()
+
+		if end := last(client.turn(frameWithMeta("resp_2", userMore, "turn-1"))); end.Get("type").String() != "response.completed" || end.Get("response.id").String() != "resp_3" {
+			t.Fatalf("turn 3 did not complete: %s", end.Raw)
+		}
+		synctest.Wait()
+		probe3 := readProbe()
+		runtime.GC()
+		if probe1.Value() == nil || probe2.Value() == nil || probe3.Value() == nil {
+			t.Fatal("active held turns were collected before idle eviction")
+		}
+
+		time.Sleep(idle + time.Second)
+		synctest.Wait()
+		runtime.GC()
+		if probe1.Value() != nil || probe2.Value() != nil || probe3.Value() != nil {
+			t.Fatalf("idle held turns were not evicted: live=(%t,%t,%t)", probe1.Value() != nil, probe2.Value() != nil, probe3.Value() != nil)
+		}
+
+		end := last(client.turn(frameWithMeta("resp_3", userMore, "turn-1")))
+		if end.Get("status").Int() != http.StatusBadRequest || end.Get("error.code").String() != "previous_response_not_found" {
+			t.Fatalf("evicted id was accepted: %s", end.Raw)
+		}
+		synctest.Wait()
+		mu.Lock()
+		if len(requests) != 3 {
+			t.Fatalf("evicted continuation dispatched upstream: got %d requests, want 3", len(requests))
+		}
+		mu.Unlock()
+
+		end = last(client.turn(frameWithMeta("", userMore, "turn-1")))
+		if end.Get("type").String() != "response.completed" || end.Get("response.id").String() != "resp_fresh" {
+			t.Fatalf("fresh full turn after idle eviction did not reuse socket: %s", end.Raw)
+		}
+		synctest.Wait()
+		mu.Lock()
+		defer mu.Unlock()
+		if len(requests) != 4 {
+			t.Fatalf("got %d upstream requests, want 4", len(requests))
+		}
+		if !slices.Equal(requests[1], []string{userHi, item1, userMore}) {
+			t.Fatalf("turn 2 input = %q", requests[1])
+		}
+		if !slices.Equal(requests[2], []string{userHi, item1, userMore, item2, userMore}) {
+			t.Fatalf("turn 3 input = %q", requests[2])
+		}
+		if !slices.Equal(requests[3], []string{userMore}) {
+			t.Fatalf("fresh turn input = %q, want only %q", requests[3], userMore)
+		}
+		if turnStates[1] != "state-1" || turnStates[2] != "state-2" || turnStates[3] != "" {
+			t.Fatalf("turn states = %q, want [\"\" state-1 state-2 \"\"]", turnStates)
+		}
+	})
+}
+
 func BenchmarkSocketOutputItem(b *testing.B) {
 	ctx, cancel := context.WithCancel(b.Context())
 	cancel()

@@ -3600,7 +3600,11 @@ serves it on `/v1/responses`, `/responses` and the Codex backend's
   `previous_response_id` from the client)
   is sent the whole conversation each turn, since those protocols keep
   nothing between requests. A socket's conversation doesn't outlive the
-  socket or the gateway.
+  socket or the gateway; an idle client `responsesSocket` also drops its held
+  turns and turn state after `responsesSocketTurnIdle` (15 minutes) with no
+  turn in flight (`TestResponsesSocketEvictsIdleHeldTurns`), answering stale
+  continuations with `previous_response_not_found` while keeping the socket
+  open for fresh turns.
   The vendor socket retains the fields it compares for a delta when there
   are at most 256 such fields and their decoded names and wire values total
   at most 256 KiB. An over-budget turn goes whole and supplies no base for
