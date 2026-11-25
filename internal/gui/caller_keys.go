@@ -280,7 +280,7 @@ func callerKeyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/provider-keys", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		pid := r.URL.Query().Get("provider")
-		keys, err := access.ProviderKeys(pid, groupRefs(pid))
+		keys, err := access.ProviderKeys(pid, groupRefs(r.Context(), pid))
 		if err != nil {
 			fail(w, err)
 			return
@@ -300,7 +300,7 @@ func callerKeyRoutes(mux *http.ServeMux) {
 		access.MigrateLegacyLANKeyBestEffort()
 		// a key on every model, unticked, keeps every other provider
 		var ids []string
-		groups := groupRefs(in.Provider)
+		groups := groupRefs(r.Context(), in.Provider)
 		if len(in.Remove) > 0 {
 			var complete bool
 			ids, complete = provider.IDsContext(r.Context())
@@ -391,14 +391,14 @@ func accountGroupsJSON() []access.AccountGroup {
 // template (Group.Template): magpie picks its members again from the
 // user's models as they change, so a model of pid's may join it later
 // with no save by the user, and a key held to it would reach pid then.
-func groupRefs(pid string) []access.GroupRef {
+func groupRefs(ctx context.Context, pid string) []access.GroupRef {
 	pid = strings.TrimSpace(pid)
-	all := provider.Groups()
+	all := provider.GroupsContext(ctx)
 	byID := map[string]provider.Group{}
 	for _, g := range all {
 		byID[strings.ToLower(g.ID)] = g
 	}
-	find := provider.GroupFinder()
+	find := provider.GroupFinderContext(ctx)
 	var reaches func(g provider.Group, seen map[string]bool) bool
 	reaches = func(g provider.Group, seen map[string]bool) bool {
 		if seen[strings.ToLower(g.ID)] {

@@ -1783,7 +1783,7 @@ func newModelRows(r *http.Request, shown []provider.Entry) modelRows {
 	told := local(r) || sharedWith(r)
 	rs := modelRows{tiers: codexTiers(shown), prices: told && r.Header.Get(provider.PricesHeader) != ""}
 	if told {
-		rs.priceOf = provider.EntryPricer(settings.Load(), provider.GroupFinder())
+		rs.priceOf = provider.EntryPricer(settings.Load(), provider.GroupFinderContext(r.Context()))
 	}
 	return rs
 }

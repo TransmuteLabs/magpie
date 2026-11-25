@@ -99,7 +99,7 @@ func (s *Server) accountsList(w http.ResponseWriter, r *http.Request) {
 			if ctx.Err() != nil {
 				return
 			}
-			models[i] = modelsListed(p, scope)
+			models[i] = modelsListed(ctx, p, scope)
 			if full {
 				es = append(es, provider.EntriesOf(p, models[i])...)
 			}
@@ -177,10 +177,10 @@ func queryYes(v string) bool {
 // modelsListed is every model p can be asked for (Available, read once a
 // provider), less those on none of its APIs, and for a held key those the
 // key may use.
-func modelsListed(p provider.Provider, scope *quotaScope) []catalog.Model {
+func modelsListed(ctx context.Context, p provider.Provider, scope *quotaScope) []catalog.Model {
 	noAPI := p.NoAPI()
 	var out []catalog.Model
-	for _, m := range p.Available() {
+	for _, m := range p.AvailableContext(ctx) {
 		if noAPI(m.ID) || scope != nil && !modelListed(scope.who, p, m.ID) {
 			continue
 		}

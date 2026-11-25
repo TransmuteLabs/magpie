@@ -564,7 +564,13 @@ func sharedGroups() []Group {
 // rules for the one it wanted, each time: 4 MB of the window's 15-second
 // drift poll, and once per request on a group.
 func sharedGroupsIn(entries []Entry) []Group {
-	return heldFrom("groups", entries, buildGroupsIn)
+	return sharedGroupsInContext(context.Background(), entries)
+}
+
+func sharedGroupsInContext(ctx context.Context, entries []Entry) []Group {
+	return heldFromContext(ctx, "groups", entries, func(entries []Entry) []Group {
+		return buildGroupsInContext(ctx, entries)
+	})
 }
 
 // cloneGroup is g with nothing shared with it (cloneGroups).
@@ -1366,6 +1372,10 @@ func groupNamed(all []Group, id string) (string, bool) {
 // GroupFinder is FindGroup for looking up many: every provider's models
 // are read once, when the first group is looked up, not again for each.
 func GroupFinder() func(id string) (Group, []Member, bool) {
+	return GroupFinderContext(context.Background())
+}
+
+func GroupFinderContext(ctx context.Context) func(id string) (Group, []Member, bool) {
 	var (
 		entries []Entry
 		all     []Group
@@ -1381,8 +1391,8 @@ func GroupFinder() func(id string) (Group, []Member, bool) {
 			return Group{}, nil, false
 		}
 		if !read {
-			entries, read = providerEntries(), true
-			all, find = sharedGroupsIn(entries), heldFrom("entries by", entries, entriesBy)
+			entries, read = providerEntriesContext(ctx), true
+			all, find = sharedGroupsInContext(ctx, entries), heldFromContext(ctx, "entries by", entries, entriesBy)
 		}
 		if g, ok := routedGroupOf(all, gid); ok && !g.Disabled {
 			groupsFound.Add(1)

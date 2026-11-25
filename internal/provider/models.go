@@ -37,6 +37,10 @@ func (p Provider) Available() []catalog.Model {
 	return p.availableContext(context.Background())
 }
 
+func (p Provider) AvailableContext(ctx context.Context) []catalog.Model {
+	return p.availableContext(ctx)
+}
+
 func (p Provider) availableContext(ctx context.Context) []catalog.Model {
 	if p.DecideOnly() {
 		if p.IsExtension() {
