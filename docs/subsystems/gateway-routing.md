@@ -3316,6 +3316,12 @@ generation, so it weighs nothing on the core.
 `TestVideoGenPicksAMarkedModel`, `TestVideoGenCheckedAndKept`,
 `TestVideoGenModelsListed`, `video-gen-pick.test.cjs`.
 
+The main Settings GET and POST calculate the automatic video pick, the
+missing manual pick and the model list before checking their catalog
+observation. If that observation changed, Settings recomputes all three
+with the refreshed providers. `ProjectVideoSettings` defers writing the
+automatic hold until Settings accepts the observation.
+
 An Ark key's list marks its video and image models by `domain`
 (`VideoGeneration`, `ImageGeneration`) and
 `modalities.output_modalities`, with no `kind`; `catalog`'s live parse

@@ -340,12 +340,24 @@ func VideomakerMissingOf(v string) string {
 // second from the key's balance, and a key set up for chat would
 // otherwise take videos a subscription made before.
 func AutoVideomaker() string {
-	// the provider the pick is held to makes them while it can (heldPick,
-	// auto_picks.go): one added later doesn't take it over
+	video := ProjectVideoSettings("")
+	video.Settle()
+	return video.Auto
+}
+
+type VideoProjection struct {
+	Auto, Missing    string
+	held, providerID string
+}
+
+func ProjectVideoSettings(picked string) VideoProjection {
 	held := heldPick(slotVideo)
-	m := autoVideomaker(held)
-	settlePick(slotVideo, held, held != "" && providerOfRef(m) == held, providerOfRef(m))
-	return m
+	model := autoVideomaker(held)
+	return VideoProjection{Auto: model, Missing: VideomakerMissingOf(picked), held: held, providerID: providerOfRef(model)}
+}
+
+func (video VideoProjection) Settle() {
+	settlePick(slotVideo, video.held, video.held != "" && video.held == video.providerID, video.providerID)
 }
 
 func autoVideomaker(held string) string {

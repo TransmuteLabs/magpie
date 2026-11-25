@@ -1013,15 +1013,22 @@ func settingsStateContext(ctx context.Context, checkModelSources bool) (settings
 			return s, false
 		}
 		vision := gateway.ProjectVisionSettings(s.Vision, s.VisionEffort)
+		video := gateway.ProjectVideoSettings(s.VideoGen)
+		if ctx.Err() != nil {
+			return s, false
+		}
+		videoModels := videoSettingsModels(s.VideoGen, providers)
 		if !checkModelSources || modelSources.CurrentWithAccountSources(ctx) {
 			if ctx.Err() != nil {
 				return s, false
 			}
 			s.VisionAuto, s.VisionMissing, s.VisionEfforts, s.VisionEffortNow = vision.Auto, vision.Missing, vision.Levels, vision.Effort
+			s.VideoGenAuto, s.VideoGenMissing, s.VideoGenModels = video.Auto, video.Missing, videoModels
+			video.Settle()
 			vision.Settle()
 			break
 		}
-		if attempt == 1 {
+		if ctx.Err() != nil || attempt == 1 {
 			return s, false
 		}
 		modelSources = provider.RefreshModelListSources(ctx)
@@ -1116,19 +1123,6 @@ func settingsStateContext(ctx context.Context, checkModelSources bool) (settings
 		s.ImageGenShown = v
 	}
 	s.ImageGenHidden = gateway.DrawerHidden(s.ImageGen)
-	s.VideoGenAuto, s.VideoGenModels, s.VideoGenMissing = gateway.AutoVideomaker(), []modelRef{}, gateway.VideomakerMissing()
-	for _, p := range providers {
-		if !p.On() || p.DecideOnly() {
-			continue
-		}
-		// one unticked in its editor is left out, but the one picked here
-		for _, m := range gateway.Videomakers(p) {
-			if p.VideomakerHidden(m.ID) && s.VideoGen != p.ID+"/"+m.ID {
-				continue
-			}
-			s.VideoGenModels = append(s.VideoGenModels, modelRef{ID: p.ID + "/" + m.ID, Name: cmp.Or(m.Name, m.ID), Provider: p.ID, PName: p.Name, Icon: p.Icon})
-		}
-	}
 	// the Codex subagents row's warning: magpie's multi-agent V1 doesn't reach
 	// Codex where its own multi_agent_v2 is on in the config magpie routes, and
 	// magpie writes nothing there — the setting is the user's to turn off
@@ -1137,6 +1131,23 @@ func settingsStateContext(ctx context.Context, checkModelSources bool) (settings
 		s.Notice = agent.CodexSubAgentsV1Warning()
 	}
 	return s, true
+}
+
+func videoSettingsModels(picked string, providers []provider.Provider) []modelRef {
+	models := []modelRef{}
+	for _, maker := range providers {
+		if !maker.On() || maker.DecideOnly() {
+			continue
+		}
+		for _, model := range gateway.Videomakers(maker) {
+			id := maker.ID + "/" + model.ID
+			if maker.VideomakerHidden(model.ID) && picked != id {
+				continue
+			}
+			models = append(models, modelRef{ID: id, Name: cmp.Or(model.Name, model.ID), Provider: maker.ID, PName: maker.Name, Icon: maker.Icon})
+		}
+	}
+	return models
 }
 
 // latest is the latest of ts, nil when there is none.
