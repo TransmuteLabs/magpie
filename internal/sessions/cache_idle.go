@@ -29,7 +29,7 @@ func init() { cacheKept.off = testing.Testing() }
 // cacheDrops counts the times the parses were let go, for the tests.
 var cacheDrops atomic.Int64
 
-// cacheUsed notes a read of the parses and arms the idle check. mu is held.
+// cacheUsed notes a read of a held cache and arms the idle check.
 func cacheUsed() {
 	if cacheKept.off {
 		return
@@ -70,10 +70,14 @@ func dropIdleCache() bool { return dropCache(cacheIdle) }
 // parse (~40 MB live for a real history) otherwise stayed three minutes
 // after it closed. It says whether they went, or there were none.
 func ForgetParses() bool {
+	return hasHeldCaches() && dropCache(0)
+}
+
+func hasHeldCaches() bool {
 	mu.Lock()
-	had := loaded
+	has := loaded || len(ccUUIDMemo) > 0 || len(ccRestMemo) > 0 || len(ccFamilies.groups) > 0
 	mu.Unlock()
-	return had && dropCache(0)
+	return has || hasIdleCalls() || hasCodexForks()
 }
 
 // dropCache is dropIdleCache with the time nothing must have read the
@@ -82,7 +86,9 @@ func dropCache(idle time.Duration) bool {
 	saved() // what the next read loads is what is in memory now
 	mu.Lock()
 	defer mu.Unlock()
-	if !loaded {
+	hadParses := loaded
+	hadCC := len(ccUUIDMemo) > 0 || len(ccRestMemo) > 0 || len(ccFamilies.groups) > 0
+	if !hadParses && !hadCC && !hasIdleCalls() && !hasCodexForks() {
 		return true
 	}
 	if idle > 0 && time.Since(time.Unix(0, cacheKept.last.Load())) < idle {
@@ -94,20 +100,27 @@ func dropCache(idle time.Duration) bool {
 	if pending || len(parsing) > 0 || len(overlaid) > 0 || len(behind) > 0 {
 		return false
 	}
-	cache, loaded = map[string]*state{}, false
-	cacheGeneration++ // a refresh still holding the old generation drops its parses
-	forgetKeptStats()
-	forgetKeptList()
-	// what is made again from the parses or the folders on the next read:
-	// Codex's thread identities (~3.5 MB), and each Codex day folder's
-	// rollouts and every folder's listing as last read (~5.5 MB)
-	codexIdentityMemo.Lock()
-	codexIdentityMemo.kept = nil
-	codexIdentityMemo.Unlock()
-	rolloutsSeen.Clear()
-	forgetListsKept() // each lister's last list (~5 MB)
-	ccListed.Clear()  // every Claude Code file's path and key (~2 MB)
-	dirent.Forget()
+	if hadParses {
+		cache, loaded = map[string]*state{}, false
+		cacheGeneration++ // a refresh still holding the old generation drops its parses
+		forgetKeptStats()
+		forgetKeptList()
+		// what is made again from the parses or the folders on the next read:
+		// Codex's thread identities (~3.5 MB), and each Codex day folder's
+		// rollouts and every folder's listing as last read (~5.5 MB)
+		codexIdentityMemo.Lock()
+		codexIdentityMemo.kept = nil
+		codexIdentityMemo.Unlock()
+		rolloutsSeen.Clear()
+		forgetListsKept() // each lister's last list (~5 MB)
+		ccListed.Clear()  // every Claude Code file's path and key (~2 MB)
+		dirent.Forget()
+	}
+	if hadCC {
+		ccFamiliesIdleForget()
+	}
+	forgetIdleCalls()
+	forgetCodexForks()
 	cacheDrops.Add(1)
 	return true
 }

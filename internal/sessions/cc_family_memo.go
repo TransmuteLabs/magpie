@@ -187,12 +187,28 @@ func ccFamiliesForget() {
 	ccRestWrites.Wait()
 	ccFamilies.path, ccFamilies.groups, ccFamilies.dirty = "", nil, false
 	ccRestKept.path, ccRestKept.dirty = "", false
-	clear(ccRestMemo)
+	ccRestMemo = map[string]*ccRestOf{}
 	ccUUIDWait()
 	ccRestIDWrites.Wait()
-	clear(ccUUIDMemo)
+	ccUUIDMemo = map[string]*ccUUIDs{}
 	clear(ccUUIDDirty)
 	ccUUIDPruned = ""
+}
+
+// ccFamiliesIdleForget flushes any dirty Claude copy/uuid memos to disk and
+// releases their in-memory maps while keeping the on-disk files intact. Under mu.
+func ccFamiliesIdleForget() {
+	ccFamiliesSave()
+	ccRestSave()
+	ccFamilyWrites.Wait()
+	ccRestWrites.Wait()
+	ccUUIDWait()
+	ccRestIDWrites.Wait()
+	ccFamilies.path, ccFamilies.groups, ccFamilies.dirty = "", nil, false
+	ccRestKept.path, ccRestKept.dirty = "", false
+	ccRestMemo = map[string]*ccRestOf{}
+	ccUUIDMemo = map[string]*ccUUIDs{}
+	clear(ccUUIDDirty)
 }
 
 // What a copy or branch holds that the file it is kept in doesn't (ccRest)

@@ -53,6 +53,7 @@ func keepCallContinuation(st *callFile) {
 	state.dirty = nil
 	callContinuations[st.Path] = callContinuation{state, len(st.Calls)}
 	callContinuationOrder = append(callContinuationOrder, st.Path)
+	cacheUsed()
 	trimCallRevisions(time.Now())
 }
 

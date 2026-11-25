@@ -2076,6 +2076,7 @@ func Reset() {
 	directoryCache.entries = map[string]directoryEntry{}
 	directoryCache.Unlock()
 	resetCalls()
+	forgetCodexForks()
 	droidCallers.reset()
 	grokKinds.reset()
 	wslReset()

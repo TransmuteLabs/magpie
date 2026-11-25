@@ -82,8 +82,9 @@ func (s *codexUsageState) copied(total, last *cxUsage) bool {
 // readers of one version of a parent share its in-progress scan.
 var codexForks struct {
 	sync.Mutex
-	kept    []codexForkParent
-	reading []*codexForkRead
+	generation uint64
+	kept       []codexForkParent
+	reading    []*codexForkRead
 }
 
 type codexForkParent struct {
@@ -99,6 +100,21 @@ type codexForkRead struct {
 }
 
 const codexForksKept = 8
+
+func hasCodexForks() bool {
+	codexForks.Lock()
+	has := len(codexForks.kept) > 0
+	codexForks.Unlock()
+	return has
+}
+
+func forgetCodexForks() {
+	codexForks.Lock()
+	clear(codexForks.kept)
+	codexForks.kept = nil
+	codexForks.generation++
+	codexForks.Unlock()
+}
 
 func codexParentFileInfo(path string) os.FileInfo {
 	file, err := os.Open(path)
@@ -133,6 +149,7 @@ func codexCheckpointsOf(path string) (map[cxCheckpoint]bool, map[string]bool) {
 		if kept.path == path && sameCodexParent(kept.info, info) {
 			codexForks.Unlock()
 			file.Close()
+			cacheUsed()
 			return kept.marks, kept.turns
 		}
 	}
@@ -148,16 +165,18 @@ func codexCheckpointsOf(path string) (map[cxCheckpoint]bool, map[string]bool) {
 		codexForkParent: codexForkParent{path: path, info: info},
 		done:            make(chan struct{}),
 	}
+	generation := codexForks.generation
 	codexForks.reading = append(codexForks.reading, reading)
 	codexForks.Unlock()
 
 	marks, turns, after := readCodexParent(file)
 	unchanged := sameCodexParent(info, after) && sameCodexParent(info, codexParentFileInfo(path))
+	stored := false
 	codexForks.Lock()
 	index := slices.Index(codexForks.reading, reading)
 	codexForks.reading = slices.Delete(codexForks.reading, index, index+1)
 	reading.marks, reading.turns = marks, turns
-	if unchanged {
+	if unchanged && generation == codexForks.generation {
 		codexForks.kept = slices.DeleteFunc(codexForks.kept, func(parent codexForkParent) bool {
 			return parent.path == path
 		})
@@ -165,9 +184,13 @@ func codexCheckpointsOf(path string) (map[cxCheckpoint]bool, map[string]bool) {
 			codexForks.kept = slices.Delete(codexForks.kept, 0, 1)
 		}
 		codexForks.kept = append(codexForks.kept, reading.codexForkParent)
+		stored = true
 	}
 	close(reading.done)
 	codexForks.Unlock()
+	if stored {
+		cacheUsed()
+	}
 	return marks, turns
 }
 

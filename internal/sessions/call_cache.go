@@ -140,6 +140,24 @@ func resetCalls() {
 	wbGateway.Unlock()
 }
 
+// hasIdleCalls reports whether in-memory call records or continuations are held.
+func hasIdleCalls() bool {
+	callsMu.Lock()
+	has := len(callCache) > 0 || len(callContinuations) > 0
+	callsMu.Unlock()
+	return has
+}
+
+// forgetIdleCalls drops in-memory call records and continuations while leaving
+// on-disk shards, revision windows, packs, root tracking and allocation hints intact.
+func forgetIdleCalls() {
+	callsMu.Lock()
+	callCache, callOrder = map[string]*callFile{}, nil
+	callContinuations, callContinuationOrder = map[string]callContinuation{}, nil
+	callGeneration++
+	callsMu.Unlock()
+}
+
 func pruneCalls(files []file) {
 	root := callCacheDir()
 	callsMu.Lock()
@@ -257,6 +275,7 @@ func keepCalls(path string, st *callFile) {
 	}
 	callCache[path] = st
 	callOrder = append(callOrder, path)
+	cacheUsed()
 	// A file kept with no revision window adds nothing to trim, and a
 	// usage build keeps one for each of the ~11k files a long history
 	// holds: trimming after each, a sort and a map under callsMu, had its
