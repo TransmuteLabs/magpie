@@ -43,7 +43,8 @@ func TestSettingsProjectionsDeferAutoPickSettlement(t *testing.T) {
 	providers := provider.All()
 	var drawers SettingsDrawers
 	drawerProj := drawers.Project(providers, "")
-	videoProj := ProjectVideoSettings("")
+	videoProj := ProjectVideoSettingsFor(providers, "")
+	visionProj := ProjectVisionSettingsFor(providers, "", "high")
 	searchProj := ProjectSearchSettings(providers, "", "high")
 
 	if drawerProj.Auto != "oai/gpt-image-2" {
@@ -52,11 +53,17 @@ func TestSettingsProjectionsDeferAutoPickSettlement(t *testing.T) {
 	if videoProj.Auto != "oai/sora-2" {
 		t.Fatalf("videoProj.Auto = %q, want oai/sora-2", videoProj.Auto)
 	}
+	if visionProj.Missing != "" {
+		t.Fatalf("visionProj.Missing = %q, want empty", visionProj.Missing)
+	}
 	if !strings.HasPrefix(searchProj.Auto, "OpenAI") || !strings.HasPrefix(searchProj.Searcher, "OpenAI") {
 		t.Fatalf("searchProj = %+v, want OpenAI auto/searcher", searchProj)
 	}
 	if len(searchProj.Choices) == 0 {
 		t.Fatalf("searchProj.Choices empty")
+	}
+	if DrawerHiddenIn(providers, "oai/gpt-image-2") {
+		t.Fatalf("DrawerHiddenIn reported visible model hidden")
 	}
 
 	before := heldFile(t)
@@ -66,6 +73,7 @@ func TestSettingsProjectionsDeferAutoPickSettlement(t *testing.T) {
 
 	drawerProj.Settle()
 	videoProj.Settle()
+	visionProj.Settle()
 	searchProj.Settle()
 
 	after := heldFile(t)

@@ -3348,7 +3348,8 @@ generation, so it weighs nothing on the core.
 The main Settings GET and POST calculate the automatic video pick, the
 missing manual pick and the model list before checking their catalog
 observation. If that observation changed, Settings recomputes all three
-with the refreshed providers. `ProjectVideoSettings` defers writing the
+with the refreshed providers. `ProjectVideoSettingsFor` computes the video
+projection from the same held `providers` snapshot and defers writing the
 automatic hold until Settings accepts the observation.
 
 An Ark key's list marks its video and image models by `domain`

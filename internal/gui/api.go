@@ -936,6 +936,7 @@ func settingsStateContext(ctx context.Context, checkModelSources bool) (settings
 	}
 	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Portable: settings.Portable() != "", Gateway: gateway.URL()}
 	providers, models, groups := provider.AllContext(ctx), provider.ServedContext(ctx), provider.GroupsContext(ctx)
+	providers = provider.HoldExtensionModels(ctx, providers)
 	s.CheckinPlugins, s.CheckinAccounts = provider.CheckinSettingsContext(ctx)
 	if ctx.Err() != nil {
 		return s, false
@@ -1020,8 +1021,8 @@ func settingsStateContext(ctx context.Context, checkModelSources bool) (settings
 		if ctx.Err() != nil {
 			return s, false
 		}
-		vision := gateway.ProjectVisionSettings(s.Vision, s.VisionEffort)
-		video := gateway.ProjectVideoSettings(s.VideoGen)
+		vision := gateway.ProjectVisionSettingsFor(providers, s.Vision, s.VisionEffort)
+		video := gateway.ProjectVideoSettingsFor(providers, s.VideoGen)
 		var drawers gateway.SettingsDrawers
 		drawer := drawers.Project(providers, s.ImageGen)
 		search := gateway.ProjectSearchSettings(providers, s.Searcher, s.SearcherEffort)
@@ -1049,6 +1050,7 @@ func settingsStateContext(ctx context.Context, checkModelSources bool) (settings
 		}
 		modelSources = provider.RefreshModelListSources(ctx)
 		providers, models, groups = provider.AllContext(ctx), provider.ServedContext(ctx), provider.GroupsContext(ctx)
+		providers = provider.HoldExtensionModels(ctx, providers)
 		s.CheckinPlugins, s.CheckinAccounts = provider.CheckinSettingsContext(ctx)
 		if ctx.Err() != nil {
 			return s, false
@@ -1160,7 +1162,7 @@ func imageSettingsModels(picked string, providers []provider.Provider, models []
 	if listedPick != picked {
 		shown = listedPick
 	}
-	return items, shown, gateway.DrawerHidden(picked)
+	return items, shown, gateway.DrawerHiddenIn(providers, picked)
 }
 
 // latest is the latest of ts, nil when there is none.

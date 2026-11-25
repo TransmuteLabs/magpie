@@ -314,6 +314,10 @@ func VideomakerMissing() string { return VideomakerMissingOf(settings.Shared().V
 // no longer marks a video model, #1399). A routing group resolves while
 // one of its members makes videos.
 func VideomakerMissingOf(v string) string {
+	return videomakerMissingFrom(provider.All(), v)
+}
+
+func videomakerMissingFrom(providers []provider.Provider, v string) string {
 	if v == "" {
 		return ""
 	}
@@ -324,11 +328,15 @@ func VideomakerMissingOf(v string) string {
 		return v
 	}
 	id, model, _ := strings.Cut(v, "/")
-	p, err := provider.Find(id)
-	if err != nil || !p.On() || p.DecideOnly() {
+	index := slices.IndexFunc(providers, func(p provider.Provider) bool { return p.ID == id })
+	if index < 0 {
 		return v
 	}
-	if slices.ContainsFunc(Videomakers(*p), func(m catalog.Model) bool { return m.ID == model }) {
+	p := providers[index]
+	if !p.On() || p.DecideOnly() {
+		return v
+	}
+	if slices.ContainsFunc(Videomakers(p), func(m catalog.Model) bool { return m.ID == model }) {
 		return ""
 	}
 	return v
@@ -351,9 +359,13 @@ type VideoProjection struct {
 }
 
 func ProjectVideoSettings(picked string) VideoProjection {
+	return ProjectVideoSettingsFor(provider.All(), picked)
+}
+
+func ProjectVideoSettingsFor(providers []provider.Provider, picked string) VideoProjection {
 	held := heldPick(slotVideo)
-	model := autoVideomaker(held)
-	return VideoProjection{Auto: model, Missing: VideomakerMissingOf(picked), held: held, providerID: providerOfRef(model)}
+	model := autoVideomakerFrom(providers, held)
+	return VideoProjection{Auto: model, Missing: videomakerMissingFrom(providers, picked), held: held, providerID: providerOfRef(model)}
 }
 
 func (video VideoProjection) Settle() {
@@ -361,15 +373,22 @@ func (video VideoProjection) Settle() {
 }
 
 func autoVideomaker(held string) string {
+	return autoVideomakerFrom(provider.All(), held)
+}
+
+func autoVideomakerFrom(providers []provider.Provider, held string) string {
 	if held != "" {
-		if p, err := provider.Find(held); err == nil && p.On() && !p.DecideOnly() {
-			if ms := OfferedVideomakers(*p); len(ms) > 0 {
-				return p.ID + "/" + ms[0].ID
+		if index := slices.IndexFunc(providers, func(p provider.Provider) bool { return p.ID == held }); index >= 0 {
+			p := providers[index]
+			if p.On() && !p.DecideOnly() {
+				if ms := OfferedVideomakers(p); len(ms) > 0 {
+					return p.ID + "/" + ms[0].ID
+				}
 			}
 		}
 	}
 	paid := ""
-	for _, p := range provider.All() {
+	for _, p := range providers {
 		if !p.On() || p.DecideOnly() {
 			continue
 		}

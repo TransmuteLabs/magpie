@@ -246,8 +246,12 @@ type visionPick struct {
 }
 
 func chooseVision() visionPick {
+	return chooseVisionFrom(provider.All())
+}
+
+func chooseVisionFrom(providers []provider.Provider) visionPick {
 	held := heldPick(slotVision)
-	r := seersRankedHeld(nil, held)
+	r := seersRankedHeldFrom(providers, nil, held)
 	if len(r) == 0 {
 		return visionPick{}
 	}
@@ -289,6 +293,10 @@ func seersRanked(skip func(string) bool) []rankedSeer {
 // recognition's Automatic pick is held to (heldPick), before every other
 // of its readiness: a Claude account added later doesn't take it over.
 func seersRankedHeld(skip func(string) bool, held string) []rankedSeer {
+	return seersRankedHeldFrom(provider.All(), skip, held)
+}
+
+func seersRankedHeldFrom(providers []provider.Provider, skip func(string) bool, held string) []rankedSeer {
 	tier := func(p provider.Provider) int {
 		switch {
 		case held != "" && p.ID == held:
@@ -308,7 +316,7 @@ func seersRankedHeld(skip func(string) bool, held string) []rankedSeer {
 		cost float64
 	}
 	var rs []ranked
-	for _, p := range provider.All() {
+	for _, p := range providers {
 		cs := seerCandidates(p)
 		if len(cs) == 0 {
 			continue

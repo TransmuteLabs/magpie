@@ -52,15 +52,17 @@ Folding the list or leaving the page does not transfer focus to a new list.
 
 ### Settings publication across responses
 
-In one Settings response, `SettingsDrawers` shares an SDK provider's checked
-image-generation list between the Automatic pick, the offered models, and both
-group checks and the missing-pick check. An empty source model list is read again
-if needed. Each subsequent response builds its own list from the current SDK
-selection. The main Settings GET and POST compute image-generation (`SettingsDrawers.Project`),
-video (`ProjectVideoSettings`), vision (`ProjectVisionSettings`), and search
-(`ProjectSearchSettings`) projections inside the catalog-authority retry loop
-from the same `providers` snapshot and defer `Settle()` on `auto-picks.json`
-until the observation is accepted.
+In one Settings response attempt, `provider.HoldExtensionModels` shares each SDK
+provider's non-empty model list across `SettingsDrawers.Project`,
+`ProjectVideoSettingsFor`, `ProjectVisionSettingsFor`, `ProjectSearchSettings`,
+`videoSettingsModels`, `imageSettingsModels` (`DrawerHiddenIn`), and
+`DisabledHitsFor`. Empty or canceled reads are not cached so revocation,
+withdrawal, or cancellation fails closed on the next look. `SettingsDrawers`
+keeps sharing an SDK provider's checked image-generation list between the
+Automatic pick, offered models, group checks, and missing-pick check. Each
+subsequent response or catalog-authority retry builds a fresh held snapshot from
+the current SDK selection and defers `Settle()` on `auto-picks.json` until the
+observation is accepted.
 
 The common `api`/`prefDeliver` owner in
 [`app.js`](../../internal/gui/assets/app.js) keeps Settings authority across

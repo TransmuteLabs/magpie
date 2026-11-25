@@ -594,9 +594,13 @@ func ProjectSearchSettings(providers []provider.Provider, picked, effort string)
 	if activeOK {
 		projection.Searcher = searcherName(activeProvider, activeModel)
 		if activeModel != "" && activeModel != codexSearchModel {
-			projection.Efforts = ModelEfforts(activeProvider.ID + "/" + activeModel)
+			if !activeProvider.ServesNone() {
+				projection.Efforts = ByStrength(activeProvider.Efforts(activeModel))
+			}
+			if effort != "" && len(projection.Efforts) > 0 {
+				projection.EffortNow = fitEffort(effort, projection.Efforts)
+			}
 		}
-		projection.EffortNow = searchEffortWith(activeProvider, activeModel, effort)
 	}
 	return projection
 }

@@ -1,6 +1,9 @@
 package gateway
 
 import (
+	"slices"
+	"strings"
+
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -83,25 +86,46 @@ type VisionProjection struct {
 }
 
 func ProjectVisionSettings(picked, want string) VisionProjection {
-	pick := chooseVision()
+	return ProjectVisionSettingsFor(provider.All(), picked, want)
+}
+
+func ProjectVisionSettingsFor(providers []provider.Provider, picked, want string) VisionProjection {
+	pick := chooseVisionFrom(providers)
 	vision := VisionProjection{Auto: pick.model, pick: pick}
 	if picked == "off" {
 		return vision
 	}
 	if picked != "" {
-		if p, model, ok := provider.Resolve(picked); ok {
+		if p, model, ok := resolveInProviders(providers, picked); ok {
 			vision.Levels = ByStrength(p.Efforts(model))
 		} else {
 			vision.Missing = picked
 		}
 	}
 	if vision.Auto != "" && (picked == "" || vision.Missing != "") {
-		vision.Levels = ModelEfforts(vision.Auto)
+		if p, model, ok := resolveInProviders(providers, vision.Auto); ok {
+			vision.Levels = ByStrength(p.Efforts(model))
+		}
 	}
 	if want != "" && len(vision.Levels) != 0 {
 		vision.Effort = fitEffort(want, vision.Levels)
 	}
 	return vision
+}
+
+func resolveInProviders(providers []provider.Provider, ref string) (provider.Provider, string, bool) {
+	id := provider.ThroughSelf(strings.TrimSuffix(strings.TrimSpace(ref), "[1m]"))
+	if !provider.IsGroupRef(id) {
+		if pid, model, ok := strings.Cut(id, "/"); ok {
+			if index := slices.IndexFunc(providers, func(p provider.Provider) bool { return p.ID == pid }); index >= 0 {
+				p := providers[index]
+				if p.On() && !p.ServesNone() {
+					return p, model, true
+				}
+			}
+		}
+	}
+	return provider.Resolve(ref)
 }
 
 func (vision VisionProjection) Settle() { vision.pick.settle() }

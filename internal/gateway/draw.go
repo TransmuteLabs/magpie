@@ -126,11 +126,15 @@ func drawerMissing(v string) string {
 }
 
 func drawerMissingWith(v string, drawers func(provider.Provider) []catalog.Model) string {
+	return drawerMissingFrom(nil, v, drawers)
+}
+
+func drawerMissingFrom(providers []provider.Provider, v string, drawers func(provider.Provider) []catalog.Model) string {
 	if !provider.IsGroupRef(v) {
 		if v == "" || v == "off" {
 			return ""
 		}
-		if _, _, ok := resolveDrawingWith(v, drawers); ok {
+		if _, _, ok := resolveDrawingFrom(providers, v, drawers); ok {
 			return ""
 		}
 		return v
@@ -189,6 +193,10 @@ func resolveDrawing(id string) (provider.Provider, string, bool) {
 }
 
 func resolveDrawingWith(id string, drawers func(provider.Provider) []catalog.Model) (provider.Provider, string, bool) {
+	return resolveDrawingFrom(nil, id, drawers)
+}
+
+func resolveDrawingFrom(providers []provider.Provider, id string, drawers func(provider.Provider) []catalog.Model) (provider.Provider, string, bool) {
 	draws := func(p provider.Provider, model string) bool { return drawsModelWith(p, model, drawers) }
 	if provider.IsGroupRef(id) {
 		// its first member that draws: a group of image models only
@@ -203,6 +211,15 @@ func resolveDrawingWith(id string, drawers func(provider.Provider) []catalog.Mod
 		return provider.Resolve(id)
 	}
 	if strings.Contains(id, "/") {
+		if providers != nil {
+			pid, model, _ := strings.Cut(id, "/")
+			if index := slices.IndexFunc(providers, func(p provider.Provider) bool { return p.ID == pid }); index >= 0 {
+				p := providers[index]
+				if p.On() && (!p.ServesNone() || (!p.DecideOnly() && draws(p, model))) {
+					return p, model, true
+				}
+			}
+		}
 		if p, m, ok := provider.Resolve(id); ok {
 			return p, m, true
 		}
@@ -214,7 +231,11 @@ func resolveDrawingWith(id string, drawers func(provider.Provider) []catalog.Mod
 		}
 		return provider.Resolve(id)
 	}
-	for _, p := range provider.All() {
+	all := providers
+	if all == nil {
+		all = provider.All()
+	}
+	for _, p := range all {
 		if !p.On() || p.DecideOnly() {
 			continue
 		}
@@ -425,7 +446,7 @@ func (drawer DrawerProjection) Settle() {
 
 func (list *SettingsDrawers) Project(providers []provider.Provider, picked string) DrawerProjection {
 	projection := projectAutoDrawerWith(providers, list.Models)
-	projection.Missing = drawerMissingWith(picked, list.Models)
+	projection.Missing = drawerMissingFrom(providers, picked, list.Models)
 	return projection
 }
 
@@ -593,6 +614,15 @@ func DrawerHidden(ref string) bool {
 	}
 	p, err := provider.Find(pid)
 	return err == nil && p.DrawerHidden(id)
+}
+
+func DrawerHiddenIn(providers []provider.Provider, ref string) bool {
+	pid, id, ok := strings.Cut(ListedDrawer(ref), "/")
+	if !ok {
+		return false
+	}
+	index := slices.IndexFunc(providers, func(p provider.Provider) bool { return p.ID == pid })
+	return index >= 0 && providers[index].DrawerHidden(id)
 }
 
 // kindModel is p's model id, one the user said makes images or videos
