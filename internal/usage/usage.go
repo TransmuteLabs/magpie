@@ -579,11 +579,11 @@ func agentOfSplit(ua string, primary, extra []Known) string {
 			}
 		}
 	}
-	if libraries[l] {
+	if libraries[lower] {
 		// an SDK's own User-Agent first, the app's after it: DSH's Gemini
 		// route goes out as "google-genai-sdk/2.32.0 gl-node/v25.8.2,
 		// deepseek-harness/0.2.2-rc.5 (+https://…) dsh-profile/headless"
-		if id := agentAfter(ua); id != "" {
+		if id := agentAfter(ua, primary, extra); id != "" {
 			return id
 		}
 	}
@@ -595,29 +595,40 @@ func agentOfSplit(ua string, primary, extra []Known) string {
 
 // agentAfter is the known agent a User-Agent names after its first
 // product, among the products (not the comments) it goes on to list, or "".
-func agentAfter(ua string) string {
-	var b strings.Builder
+func agentAfter(ua string, primary, extra []Known) string {
+	var builder strings.Builder
 	depth := 0
-	for _, r := range ua {
+	for _, ch := range ua {
 		switch {
-		case r == '(':
+		case ch == '(':
 			depth++
-		case r == ')' && depth > 0:
+		case ch == ')' && depth > 0:
 			depth--
 		case depth == 0:
-			b.WriteRune(r)
+			builder.WriteRune(ch)
 		}
 	}
-	words := strings.FieldsFunc(b.String(), func(r rune) bool { return r == ' ' || r == ',' })
-	for _, w := range words[min(1, len(words)):] {
-		name, _, _ := strings.Cut(w, "/")
-		l := strings.ToLower(name)
-		if l == "" || libraries[l] {
+	words := strings.FieldsFunc(builder.String(), func(ch rune) bool { return ch == ' ' || ch == ',' })
+	for _, word := range words[min(1, len(words)):] {
+		name, _, _ := strings.Cut(word, "/")
+		lower := strings.ToLower(name)
+		if lower == "" || libraries[lower] {
 			continue
 		}
-		for _, k := range knownAgents() {
-			if slices.Contains(k.Names, l) || slices.ContainsFunc(k.UA, func(p string) bool { return strings.HasPrefix(l, p) }) {
-				return k.ID
+		for _, group := range [2][]Known{primary, extra} {
+			for _, known := range group {
+				if slices.Contains(known.Names, lower) {
+					return known.ID
+				}
+			}
+		}
+		for _, group := range [2][]Known{primary, extra} {
+			for _, known := range group {
+				for _, prefix := range known.UA {
+					if strings.HasPrefix(lower, prefix) {
+						return known.ID
+					}
+				}
 			}
 		}
 	}

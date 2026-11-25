@@ -94,7 +94,7 @@ func TestResponsesSocketShortReplayDropsExpiredSuffix(test *testing.T) {
 	test.Cleanup(func() { prevResponses = previousStore })
 
 	const firstID, shortID = "resp_prefix_full", "resp_prefix_short"
-	const replyItem = `{"type":"message","id":"msg_prefix_full","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"old answer"}]}`
+	const replyItem = `{"type":"message","id":"msg_prefix_full","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"old answer","annotations":[]}]}`
 	const completed = `{"type":"response.completed","response":{"id":"` + firstID + `","object":"response","status":"completed","output":[` + replyItem + `],"usage":{"input_tokens":7,"output_tokens":1,"total_tokens":8}}}`
 	const incomplete = `{"type":"response.incomplete","response":{"id":"` + shortID + `","object":"response","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":11,"output_tokens":16,"total_tokens":27}}}`
 	upstream := &respUp{reply: func(writer http.ResponseWriter, _ *http.Request, attempt int) {

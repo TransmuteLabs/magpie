@@ -23,6 +23,12 @@ func TestKnownAgentsZeroAllocLookups(t *testing.T) {
 	if got := AgentOf("beta-cli-next/0.1"); got != "plug-beta" {
 		t.Fatalf("AgentOf(beta-cli-next/0.1) = %q, want plug-beta", got)
 	}
+	if got := AgentOf("google-genai-sdk/2.32.0 gl-node/v25.8.2, beta-cli-next/0.2 (+https://example.invalid) dsh-profile/headless"); got != "plug-beta" {
+		t.Fatalf("AgentOf(sdk + ua-prefix plugin) = %q, want plug-beta", got)
+	}
+	if got := AgentOf("google-genai-sdk/2.32.0, plug-alpha/2.1"); got != "plug-alpha" {
+		t.Fatalf("AgentOf(sdk + plugin ua) = %q, want plug-alpha", got)
+	}
 	if got := KnownAgentID("alpha"); got != "plug-alpha" {
 		t.Fatalf("KnownAgentID(alpha) = %q, want plug-alpha", got)
 	}

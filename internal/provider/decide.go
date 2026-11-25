@@ -781,19 +781,27 @@ func Deciders() []Entry {
 // own one decision model beside its chat models (a Bailian plan's, Ark's
 // pay as you go) is offered whatever the picks.
 func OfferedDeciders(keep func(id string) bool) []Entry {
+	return offeredDecidersContext(context.Background(), keep)
+}
+
+func offeredDecidersContext(ctx context.Context, keep func(id string) bool) []Entry {
 	if keep == nil {
 		keep = func(string) bool { return false }
 	}
-	return deciders(keep)
+	return decidersContext(ctx, keep)
 }
 
 // deciders are Deciders, less the unpicked ones keep doesn't name when
 // keep is given.
 func deciders(keep func(id string) bool) []Entry {
+	return decidersContext(context.Background(), keep)
+}
+
+func decidersContext(ctx context.Context, keep func(id string) bool) []Entry {
 	var out []Entry
 	s := settings.Load()
 	off := disabledNow()
-	for _, p := range All() {
+	for _, p := range AllContext(ctx) {
 		if !p.Decides() || !p.On() || p.ServesNone() && !p.DecideOnly() {
 			continue
 		}
@@ -810,7 +818,7 @@ func deciders(keep func(id string) bool) []Entry {
 			}
 		}
 		for _, m := range ms {
-			if p.isDecision(m) && !off(p.ID, m.ID) { // a disabled one isn't offered (#1867)
+			if p.isDecisionContext(ctx, m) && !off(p.ID, m.ID) { // a disabled one isn't offered (#1867)
 				if p.IsRemoteMagpie() {
 					out = append(out, sharedEntry(&p, m, s))
 				} else {

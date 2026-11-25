@@ -642,7 +642,7 @@ func buildGroupsInContext(ctx context.Context, entries []Entry) []Group {
 		}
 		if g.Template != "" {
 			if follow == nil {
-				ms, ds := ratedIn(entries), OfferedDeciders(nil)
+				ms, ds := ratedIn(entries), offeredDecidersContext(ctx, nil)
 				follow = func(g Group) Group { return followTemplate(g, ms, ds) }
 			}
 			g = follow(g)
