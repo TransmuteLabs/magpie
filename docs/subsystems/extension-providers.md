@@ -332,8 +332,9 @@ Replacing the configuration at the same CAS version retires workers
 configured with different values. Reordering JSON
 object fields leaves their configuration current. Unrelated private state and
 account-local state do not invalidate it. `extension.AccountStamp` reads
-directory/file metadata and handle-derived portable file identities without
-reading credential or catalog contents, acquiring store locks or initializing a manager.
+directory/file metadata and portable file identities (`Lstat` on Unix,
+handle-derived on non-Unix platforms) without opening tracked regular files on
+Unix, reading credential or catalog contents, acquiring store locks or initializing a manager.
 Identity distinguishes an atomic replacement
 even when size, mode and mtime are preserved. Observations are serialized outside
 the global provider cache mutex and published with monotonically increasing
