@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func sandbox(t *testing.T) string {
@@ -109,9 +110,20 @@ func TestPathsStayInside(t *testing.T) {
 
 func TestListAndDelete(t *testing.T) {
 	dir := sandbox(t)
-	a, _ := PublishPage(Publish{Page: []byte("a"), Title: "First"})
-	b, _ := PublishPage(Publish{Page: []byte("b"), Title: "Second"})
-	PublishPage(Publish{ID: a.ID, Page: []byte("a2")})
+	a, err := PublishPage(Publish{Page: []byte("a"), Title: "First"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := PublishPage(Publish{Page: []byte("b"), Title: "Second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for !time.Now().UTC().Truncate(time.Millisecond).After(b.Updated) {
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := PublishPage(Publish{ID: a.ID, Page: []byte("a2")}); err != nil {
+		t.Fatal(err)
+	}
 	// a folder with no meta.json (a publish cut short) isn't listed
 	os.MkdirAll(filepath.Join(dir, strings.Repeat("a", 26)), 0o700)
 	l, err := List()

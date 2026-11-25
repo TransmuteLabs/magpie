@@ -153,8 +153,8 @@ func TestUntrackedItemIDsOverResponses(t *testing.T) {
 	frames := []string{
 		`{"type":"response.created","response":{"id":"resp_tidy","object":"response","status":"in_progress","output":[]}}`,
 		`{"type":"response.output_text.delta","output_index":0,"item_id":"delta","content_index":0,"delta":"hi"}`,
-		`{"type":"response.output_item.done","output_index":0,"item":{"id":"done","type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"hi"}]}}`,
-		`{"type":"response.completed","response":{"id":"resp_tidy","object":"response","status":"completed","output":[{"id":"ended","type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":7,"output_tokens":2,"total_tokens":9}}}`,
+		`{"type":"response.output_item.done","output_index":0,"item":{"id":"done","type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"hi","annotations":[]}]}}`,
+		`{"type":"response.completed","response":{"id":"resp_tidy","object":"response","status":"completed","output":[{"id":"ended","type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"hi","annotations":[]}]}],"usage":{"input_tokens":7,"output_tokens":2,"total_tokens":9}}}`,
 	}
 	lines := make([]string, len(frames))
 	for index, frame := range frames {
