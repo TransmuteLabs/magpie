@@ -67,15 +67,13 @@ compares the highest strict `f-vX.Y.Z` version before allowing publication.
 An API failure stops the gate; drafts and prereleases do not suppress a
 normal release. The app and feed use the same gate output.
 
-Publication also depends on `verified`: it waits up to two hours for the
-latest eligible `Test` workflow run on this exact commit, in this repository
-and on `devzeus`. Only completed/success push or manual Test runs qualify.
-An older successful run cannot override a newer pending or failed attempt;
-missing runs, cancelled/skipped tests and API errors do not authorize a release.
-The gate reuses the ordinary Test workflow instead of launching a second suite.
-For a manual release with no Test run, run Test on the same commit first.
-[`release_gate.py`](../../build/release_gate.py) owns this check; its offline
-fixtures include the workflow's publication dependency.
+Hosted CI tests are disabled on `devzeus` pushes and do not gate fork releases
+so builds stay within runner quotas; `release` depends directly on `check`,
+`app` and `linux`. The `Test` workflow remains runnable manually via
+`workflow_dispatch`, and [`release_gate.py`](../../build/release_gate.py) with
+its offline fixtures ([`test_release_gate.py`](../../build/test_release_gate.py))
+remains in `build/` alongside the feed-asset checks for
+[`fork-release.yml`](../../.github/workflows/fork-release.yml).
 
 The macOS arm64 and Linux amd64 desktop app jobs use the same version gate
 and both must succeed before publication. Feed generation requires exactly

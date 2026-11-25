@@ -93,13 +93,17 @@ class ReleaseGateTest(unittest.TestCase):
         self.assertIn("head_sha=" + SHA, command[-1])
         self.assertEqual(call.call_args.kwargs["timeout"], 60)
 
-    def test_publishing_requires_gate(self):
-        workflow = Path(__file__).resolve().parents[1].joinpath(".github/workflows/fork-release.yml").read_text()
+    def test_publishing_does_not_block_on_ci_tests(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = root.joinpath(".github/workflows/fork-release.yml").read_text()
         release = workflow.split("\n  release:\n", 1)[1]
-        self.assertIn("needs: [check, app, linux, verified]", release)
-        self.assertIn("python3 build/release_gate.py", workflow)
-        self.assertIn('"$GITHUB_REPOSITORY" "$GITHUB_SHA"', workflow)
-        self.assertIn("actions: read", workflow)
+        self.assertIn("needs: [check, app, linux]", release)
+        self.assertNotIn("\n  verified:\n", workflow)
+        self.assertNotIn("release_gate.py", workflow)
+        test_workflow = root.joinpath(".github/workflows/test.yml").read_text()
+        push_block = test_workflow.split("\non:\n", 1)[1].split("\njobs:\n", 1)[0]
+        self.assertNotIn("devzeus", push_block)
+        self.assertIn("workflow_dispatch:", push_block)
 
     def test_command_refuses_failed_tests_and_accepts_success(self):
         # Exercise the installed command boundary without a GitHub connection

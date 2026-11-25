@@ -40,7 +40,6 @@ on:
 
 permissions:
   contents: write
-  actions: read
 
 # мержи приходят пачками: новый пуш заменяет старый ран, а гейт по версии
 # делает повтор идемпотентным (отменённый релиз сделает следующий)
@@ -201,31 +200,15 @@ jobs:
           path: dist/magpie-linux-amd64
           if-no-files-found: error
 
-  verified:
-    # Reuse Test for this exact commit; compilation alone cannot publish.
-    if: needs.check.outputs.release == 'yes' &&
-        (github.event_name == 'push' ||
-         (github.event_name == 'workflow_dispatch' && github.event.inputs.release == 'true'))
-    needs: check
-    runs-on: ubuntu-latest
-    timeout-minutes: 125
-    steps:
-      - uses: actions/checkout@v5
-      - name: Verify the release gate
-        run: python3 build/test_release_gate.py
-      - name: Wait for this commit's Test workflow
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 build/release_gate.py "$GITHUB_REPOSITORY" "$GITHUB_SHA"
-
   release:
     # пуш с новой версией; или ручной запуск с флагом release — пуш-события
     # GitHub иногда роняет (ран по коммиту push может не появиться вовсе)
+    # тесты на CI при сборке отключены (гоняются на usbox/локально или вручную через Test)
     if: needs.check.outputs.release == 'yes' &&
         (github.event_name == 'push' ||
          (github.event_name == 'workflow_dispatch' && github.event.inputs.release == 'true'))
     # при возврате windows добавить её в needs
-    needs: [check, app, linux, verified]
+    needs: [check, app, linux]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:

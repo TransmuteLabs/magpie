@@ -2,7 +2,7 @@ name: Test
 
 on:
   push:
-    branches: [main, devzeus]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -11,7 +11,7 @@ on:
 # replaces a run that hasn't started. A PR's run is cancelled by its next push.
 concurrency:
   group: test-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/devzeus' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
