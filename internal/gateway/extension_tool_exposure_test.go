@@ -69,8 +69,9 @@ func (hub exposureGatewayHub) Tools(ctx context.Context, _ string) []HubTool {
 func (hub exposureGatewayHub) Call(ctx context.Context, agent, _, tool string, args json.RawMessage) (json.RawMessage, error) {
 	return RunPluginToolResultOf(ctx, hub.spec, tool, args, agent)
 }
-func (exposureGatewayHub) Stop()  {}
-func (exposureGatewayHub) Prune() {}
+func (exposureGatewayHub) Stop()      {}
+func (exposureGatewayHub) Prune()     {}
+func (exposureGatewayHub) Met(string) {}
 
 func TestExtensionToolExposureHTTPProvenance(t *testing.T) {
 	_, calls := exposureGatewayFixture(t)
