@@ -1,9 +1,12 @@
 package access
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"testing"
+
+	"github.com/yetone/magpie/internal/settings"
 )
 
 func TestCurrentIdentityRechecksLimitsModelsAccountsAndRevocation(t *testing.T) {
@@ -53,5 +56,41 @@ func TestCurrentIdentityFailsClosedOnUnreadableStore(t *testing.T) {
 	}
 	if _, err := CurrentIdentity(original); err == nil {
 		t.Fatal("unreadable caller policy granted paid work")
+	}
+}
+
+func TestCurrentIdentityHonorsLegacyLANFallback(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	const legacySecret = "sk-magpie-legacy-task"
+	if err := settings.Save(settings.Settings{LAN: true, LANKey: legacySecret}); err != nil {
+		t.Fatal(err)
+	}
+	original, err := Check(legacySecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := CurrentIdentity(original)
+	if err != nil || !reflect.DeepEqual(current, original) {
+		t.Fatalf("CurrentIdentity(legacy) = %+v, %v, want %+v", current, err, original)
+	}
+	tampered := Identity{KeyID: original.KeyID, KeyName: original.KeyName, Default: original.Default}
+	if _, err := CurrentIdentity(tampered); err == nil {
+		t.Fatal("CurrentIdentity accepted legacy key with mismatched credential proof")
+	}
+	if err := settings.Save(settings.Settings{LAN: false, LANKey: legacySecret}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CurrentIdentity(original); !errors.Is(err, ErrNoKey) {
+		t.Fatalf("CurrentIdentity after disabling legacy LAN = %v, want ErrNoKey", err)
+	}
+	if err := settings.Save(settings.Settings{LAN: true, LANKey: legacySecret}); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateLegacyLANKey(); err != nil {
+		t.Fatal(err)
+	}
+	afterMigration, err := CurrentIdentity(original)
+	if err != nil || !reflect.DeepEqual(afterMigration, original) {
+		t.Fatalf("CurrentIdentity after migration = %+v, %v, want %+v", afterMigration, err, original)
 	}
 }

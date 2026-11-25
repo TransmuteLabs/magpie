@@ -216,12 +216,12 @@ func openRouterFreeTierModel(model string) bool {
 }
 
 func (c candidate) openRouterFreeLimited(scope openRouterLimitScope, status int) bool {
-	return status == http.StatusTooManyRequests && c.p.Preset == "openrouter" &&
+	return status == http.StatusTooManyRequests && c.p.VendorPreset() == "openrouter" &&
 		scope.freeTier() && openRouterFreeTierModel(c.refusedModel())
 }
 
 func (c candidate) openRouterFreeRest() (Rest, bool) {
-	if c.p.Preset != "openrouter" || c.p.LimitRestOff || c.p.PassesErrors() {
+	if c.p.VendorPreset() != "openrouter" || c.p.LimitRestOff || c.p.PassesErrors() {
 		return Rest{}, false
 	}
 	r, ok := restOf(c.openRouterFreeRestID())
@@ -349,12 +349,20 @@ func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, a
 // serve the model (provider.AccountModels, #474): never tried, whatever
 // else there is — none, when every one of them is.
 func perKeyBarred(p provider.Provider, model string, from provider.Protocol) (out, aside, left, barred []candidate) {
-	return perKeyBarredWithWires(p, model, from, nil)
+	return perKeyBarredContextWithWires(context.Background(), p, model, from, nil)
+}
+
+func perKeyBarredContext(ctx context.Context, p provider.Provider, model string, from provider.Protocol) (out, aside, left, barred []candidate) {
+	return perKeyBarredContextWithWires(ctx, p, model, from, nil)
 }
 
 func perKeyBarredWithWires(p provider.Provider, model string, from provider.Protocol, wires func() map[string]string) (out, aside, left, barred []candidate) {
-	out, aside, left, barred = perKeyEvery(p, model, from)
-	if wires != nil && p.Preset == "openrouter" {
+	return perKeyBarredContextWithWires(context.Background(), p, model, from, wires)
+}
+
+func perKeyBarredContextWithWires(ctx context.Context, p provider.Provider, model string, from provider.Protocol, wires func() map[string]string) (out, aside, left, barred []candidate) {
+	out, aside, left, barred = perKeyEveryContext(ctx, p, model, from)
+	if wires != nil && p.VendorPreset() == "openrouter" {
 		for _, candidates := range [][]candidate{out, aside, left, barred} {
 			for index := range candidates {
 				candidates[index].wires = wires
@@ -458,6 +466,10 @@ func keyCandidate(p provider.Provider, k provider.KeyOn, model string, capped *c
 // model's test takes them from too (#4992); the usage and spend caps are
 // the gateway's own.
 func perKeyEvery(p provider.Provider, model string, from provider.Protocol) (out, aside, left, barred []candidate) {
+	return perKeyEveryContext(context.Background(), p, model, from)
+}
+
+func perKeyEveryContext(ctx context.Context, p provider.Provider, model string, from provider.Protocol) (out, aside, left, barred []candidate) {
 	if _, off := provider.ModelDisabled(p.ID, model); off || provider.DisabledUnknown() {
 		return nil, nil, nil, nil // the user disabled it (#1867): never planned, a fallback no more than the model asked
 	}
@@ -469,7 +481,7 @@ func perKeyEvery(p provider.Provider, model string, from provider.Protocol) (out
 		// (provider/codex_credits.go)
 		now := time.Now()
 		caps := map[int]*capHold{}
-		on, unlisted, off := p.AccountsFor(model, func(a provider.AccountOn) bool {
+		on, unlisted, off := p.AccountsForContext(ctx, model, func(a provider.AccountOn) bool {
 			h := capHeld(p, a.Provider, model, now)
 			if h != nil {
 				caps[a.Rank] = h

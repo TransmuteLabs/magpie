@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +21,7 @@ import (
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/testenv"
 	"github.com/yetone/magpie/internal/usage"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -911,6 +913,66 @@ func TestExtensionAccountTaskSuccessorRunsAfterItsCompletedTick(t *testing.T) {
 	}
 	if count.Load() != 2 || len(rows) != 2 || rows[first] != 1 || rows[successor] != 1 {
 		t.Fatal("successive ticks lost or duplicated normal accounting", count.Load(), rows)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExtensionAccountTaskUsesCurrentAccountIDsAndContext(t *testing.T) {
+	server, manager, _, _, count := taskGatewayFixture(t, "")
+	const publicProvider, publicUser, stableLogin = "saved-vendor", "saved-user", "saved-login"
+	scope := sdk.Scope{Plugin: "tasks.fixture", Provider: "vendor", Account: "selected", Generation: 1}
+	saveTaskSubscriptionOwner(t, manager, scope, publicProvider, publicUser, stableLogin)
+	if err := provider.RegisterExtensionLogin(t.Context(), scope); err != nil {
+		t.Fatal(err)
+	}
+	provider.Changed()
+
+	canceledCtx, cancelNow := context.WithCancel(t.Context())
+	cancelNow()
+	selected, err := provider.FindContext(t.Context(), publicProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := accountTaskCandidate(canceledCtx, *selected, "m1"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("accountTaskCandidate with canceled context = %v, want context.Canceled", err)
+	}
+
+	secret, err := access.Update("add-key", access.Change{Name: "scoped-discovery-task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	who, err := access.Check(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := access.Update("accounts-key", access.Change{Key: who.KeyID, Accounts: []string{publicProvider + "/" + stableLogin}}); err != nil {
+		t.Fatal(err)
+	}
+	who, err = access.Check(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel, done := serveKeepAliveGateway(t, server)
+	waitFor(t, "task gateway listener", func() bool { return server.Addr() != "" })
+	blockedOp := scheduleGatewayTask(t, server, publicProvider, access.WithIdentity(t.Context(), who))
+	if err := settings.Save(settings.Settings{NoAccountDiscovery: true}); err != nil {
+		t.Fatal(err)
+	}
+	taskReceipt(t, manager, blockedOp, "not-started")
+	if count.Load() != 0 {
+		t.Fatalf("accountAllowed admitted scoped account task with NoAccountDiscovery enabled: calls=%d", count.Load())
+	}
+
+	if err := settings.Save(settings.Settings{NoAccountDiscovery: false}); err != nil {
+		t.Fatal(err)
+	}
+	admittedOp := scheduleGatewayTask(t, server, publicProvider, access.WithIdentity(t.Context(), who), "schedule:overdue")
+	taskReceipt(t, manager, admittedOp, "completed")
+	if count.Load() != 1 {
+		t.Fatalf("scoped account task after re-enabling account discovery ran %d times, want 1", count.Load())
 	}
 	cancel()
 	if err := <-done; err != nil {

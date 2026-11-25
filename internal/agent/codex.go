@@ -739,9 +739,10 @@ func codexGlobalIn(at place) *Agent {
 		return signedIn && !codexUsedUp(), true
 	}
 	putProvider := func() error {
-		want, _ := openaiAuth()
+		want, known := openaiAuth()
 		if err := planCodexGlobalProvider(path, builtincodex.GlobalProviderOptions{
-			BaseURL: at.v1(), Token: keptBearerToken(builtincodex.ProviderTablePath), OpenAIAuth: want,
+			BaseURL: at.v1(), Token: keptBearerToken(builtincodex.ProviderTablePath),
+			OpenAIAuth: want, OpenAIAuthKnown: known,
 		}); err != nil {
 			return err
 		}

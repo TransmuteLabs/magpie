@@ -61,10 +61,10 @@ func (server *Server) accountTaskAdmitter(original access.Identity, localOwner b
 			return extensionhost.AccountTaskAdmission{}, err
 		}
 		if !modelAllowed(who, selected, selection.Model) ||
-			!who.AllowsAccount(selected.ID, provider.LoginID(selected.ID, accountOf(selected))) {
+			!accountAllowed(who, selected, provider.CurrentAccountIDs(ctx)) {
 			return extensionhost.AccountTaskAdmission{}, errors.New("paid account task is outside the caller's current model/account authority")
 		}
-		candidate, err := accountTaskCandidate(selected, selection.Model)
+		candidate, err := accountTaskCandidate(ctx, selected, selection.Model)
 		if err != nil {
 			return extensionhost.AccountTaskAdmission{}, err
 		}
@@ -116,6 +116,9 @@ func (server *Server) accountTaskAdmitter(original access.Identity, localOwner b
 					return errors.New("paid account task caller policy changed during admission")
 				}
 			}
+			if !accountAllowed(who, selected, provider.CurrentAccountIDs(checkCtx)) {
+				return errors.New("paid account task is outside the caller's current model/account authority")
+			}
 			if _, resting := restedUntil(candidate); resting {
 				return errors.New("paid account task account/model began resting")
 			}
@@ -123,7 +126,7 @@ func (server *Server) accountTaskAdmitter(original access.Identity, localOwner b
 				return err
 			}
 			if selected.AtOnce() > 0 {
-				_, err := accountTaskCandidate(selected, selection.Model)
+				_, err := accountTaskCandidate(checkCtx, selected, selection.Model)
 				return err
 			}
 			return nil
@@ -136,15 +139,24 @@ func (server *Server) accountTaskAdmitter(original access.Identity, localOwner b
 	}
 }
 
-func accountTaskCandidate(selected provider.Provider, model string) (candidate, error) {
-	primary, err := provider.Find(selected.ID)
-	if err != nil || primary.Account == nil {
+func accountTaskCandidate(ctx context.Context, selected provider.Provider, model string) (candidate, error) {
+	primary, err := provider.FindContext(ctx, selected.ID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return candidate{}, ctx.Err()
+		}
 		return candidate{}, errors.New("paid task provider's current routing pool is unavailable")
 	}
-	current, beside, _, _ := perKeyBarred(*primary, model, "")
-	for _, candidate := range append(current, beside...) {
-		if candidate.reserve == 0 && candidate.p.Account != nil && candidate.p.Account.User == selected.Account.User {
-			return candidate, nil
+	if primary.Account == nil {
+		return candidate{}, errors.New("paid task provider's current routing pool is unavailable")
+	}
+	current, beside, _, _ := perKeyBarredContext(ctx, *primary, model, "")
+	if err := ctx.Err(); err != nil {
+		return candidate{}, err
+	}
+	for _, entry := range append(current, beside...) {
+		if entry.reserve == 0 && entry.p.Account != nil && entry.p.Account.User == selected.Account.User {
+			return entry, nil
 		}
 	}
 	return candidate{}, errors.New("paid task account is outside the current routing pool")

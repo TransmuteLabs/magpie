@@ -68,7 +68,11 @@ func (p Provider) AccountsOnContext(ctx context.Context) []AccountOn {
 // the model, as magpie knows it (Account.listLags), is unknown, not a
 // plan without it: that account is in out.
 func (p Provider) AccountsFor(model string, held func(AccountOn) bool) (out, left, barred []AccountOn) {
-	all := slices.DeleteFunc(p.AccountsOn(), func(a AccountOn) bool {
+	return p.AccountsForContext(context.Background(), model, held)
+}
+
+func (p Provider) AccountsForContext(ctx context.Context, model string, held func(AccountOn) bool) (out, left, barred []AccountOn) {
+	all := slices.DeleteFunc(p.AccountsOnContext(ctx), func(a AccountOn) bool {
 		if p.AccountServes(a.Account.User, model) {
 			return false
 		}

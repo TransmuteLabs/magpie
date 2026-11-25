@@ -177,3 +177,53 @@ func TestCodexMagpieProviderKeepsChatGPTAccount(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexUnknownSignInKeepsRequiresOpenAIAuth(t *testing.T) {
+	const signedIn = `{"tokens":{"access_token":"x","id_token":"x.e30.x"}}`
+	home, read := codexHome(t, signedIn, "")
+	agentCfg := codex(home)
+	if err := agentCfg.Field("login").Set("api"); err != nil {
+		t.Fatal(err)
+	}
+	if err := agentCfg.Fields[0].Set("fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg := read(); !strings.Contains(cfg, "requires_openai_auth = true") {
+		t.Fatalf("initial config missing requires_openai_auth = true:\n%s", cfg)
+	}
+
+	authPath := filepath.Join(home, ".codex", "auth.json")
+	for name, partial := range map[string]string{
+		"empty":     "",
+		"truncated": `{"tokens":{"access_tok`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(authPath, []byte(partial), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := agentCfg.Fields[0].Set("fake/m1"); err != nil {
+				t.Fatal(err)
+			}
+			if cfg := read(); !strings.Contains(cfg, "requires_openai_auth = true") {
+				t.Fatalf("SetModel while auth.json is %s dropped requires_openai_auth:\n%s", name, cfg)
+			}
+			if _, err := agentCfg.ConnectHow(); err != nil {
+				t.Fatal(err)
+			}
+			if cfg := read(); !strings.Contains(cfg, "requires_openai_auth = true") {
+				t.Fatalf("ConnectHow while auth.json is %s dropped requires_openai_auth:\n%s", name, cfg)
+			}
+		})
+	}
+
+	if err := os.WriteFile(authPath, []byte(signedIn), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	codexUsedUp = func() bool { return true }
+	if err := agentCfg.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg := read(); strings.Contains(cfg, "requires_openai_auth") {
+		t.Fatalf("known used-up ChatGPT sign-in retained requires_openai_auth:\n%s", cfg)
+	}
+}

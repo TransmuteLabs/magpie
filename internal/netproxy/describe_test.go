@@ -1,9 +1,13 @@
 package netproxy
 
 import (
+	"context"
 	"net/url"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -93,4 +97,61 @@ func TestRedactLeavesOutUserAndPassword(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestDescribeRespectsEnvNoProxyBypass(t *testing.T) {
+	const childEnv = "MAGPIE_TEST_DESCRIBE_ENV_BYPASS"
+	const fallback = "http://127.0.0.1:7892"
+	if os.Getenv(childEnv) != "" {
+		clearProxyEnv(t)
+		t.Setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+		t.Setenv("NO_PROXY", "chatgpt.com")
+		sysCache.p = Proxy{URL: fallback}
+		if got, source := Describe(); got != "" || source != "none" {
+			t.Fatalf("Describe() with HTTPS_PROXY + NO_PROXY = %q (%s), want \"\" (none)", got, source)
+		}
+		target, _ := url.Parse("https://chatgpt.com")
+		if proxy, err := For(target); err != nil || proxy != nil {
+			t.Fatalf("For(chatgpt.com) = %v, %v, want nil, nil", proxy, err)
+		}
+		return
+	}
+
+	for _, fallbackKind := range []string{"system", "shell"} {
+		t.Run("all_proxy/"+fallbackKind, func(t *testing.T) {
+			clearProxyEnv(t)
+			if fallbackKind == "system" {
+				sysCache.p = Proxy{URL: fallback}
+			} else {
+				shellSays(t, map[string]string{"HTTPS_PROXY": fallback})
+			}
+			t.Setenv("ALL_PROXY", "http://127.0.0.1:7890")
+			t.Setenv("NO_PROXY", "chatgpt.com")
+			if got, source := Describe(); got != "" || source != "none" {
+				t.Fatalf("Describe() with ALL_PROXY + NO_PROXY = %q (%s), want \"\" (none)", got, source)
+			}
+			t.Setenv("ALL_PROXY", "")
+			wantSource := "system"
+			if fallbackKind == "shell" {
+				wantSource = "environment"
+			}
+			if got, source := Describe(); got != fallback || source != wantSource {
+				t.Fatalf("Describe() after clearing ALL_PROXY = %q (%s), want %q (%s)", got, source, fallback, wantSource)
+			}
+		})
+	}
+
+	t.Run("https_proxy/system", func(t *testing.T) {
+		executable, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, executable, "-test.run=^TestDescribeRespectsEnvNoProxyBypass$")
+		cmd.Env = append(os.Environ(), childEnv+"=1", "GORACE=atexit_sleep_ms=0")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("isolated Describe() HTTPS_PROXY bypass check failed: %v\n%s", err, output)
+		}
+	})
 }

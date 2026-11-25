@@ -563,8 +563,10 @@ func Describe() (proxy, source string) {
 		return s, "settings"
 	}
 	u, _ := url.Parse("https://chatgpt.com")
-	if p, _, _ := fromEnv(u); p != nil {
+	if p, bypass, _ := fromEnv(u); p != nil {
 		return p.String(), "environment"
+	} else if bypass {
+		return "", "none"
 	}
 	sys, dead := liveSystem()
 	if sys.URL != "" {

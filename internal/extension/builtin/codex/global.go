@@ -54,9 +54,10 @@ func PlanGatewayMove(options GatewayMoveOptions, settings sdk.ActionSettings) (s
 }
 
 type GlobalProviderOptions struct {
-	BaseURL    string
-	Token      string
-	OpenAIAuth bool
+	BaseURL         string
+	Token           string
+	OpenAIAuth      bool
+	OpenAIAuthKnown bool
 }
 
 type GlobalUnrouteOptions struct {
@@ -254,7 +255,7 @@ func PlanGlobalProvider(options GlobalProviderOptions, settings sdk.ActionSettin
 		switch {
 		case table.Scalar("requires_openai_auth") == "false":
 			fields = append(fields, edit.KV{Path: "requires_openai_auth", Value: false})
-		case options.OpenAIAuth:
+		case options.OpenAIAuth || (!options.OpenAIAuthKnown && table.Scalar("requires_openai_auth") == "true"):
 			fields = append(fields, edit.KV{Path: "requires_openai_auth", Value: true})
 		}
 		return fields

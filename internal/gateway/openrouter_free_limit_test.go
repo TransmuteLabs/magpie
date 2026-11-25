@@ -739,3 +739,51 @@ func testOpenRouterFreeTierWithTranslatedTool(t *testing.T, tool string) {
 		})
 	}
 }
+
+func TestOpenRouterFreeTierPluginProviderUsesVendorPreset(t *testing.T) {
+	fresh(t)
+	pluginProvider := provider.PluginAtForTest("plugin-or", "openrouter-plugin", "https://openrouter.ai/api/v1")
+	if pluginProvider.Preset != "" || pluginProvider.VendorPreset() != "openrouter" {
+		t.Fatalf("unexpected plugin provider preset=%q vendorPreset=%q", pluginProvider.Preset, pluginProvider.VendorPreset())
+	}
+
+	freeCand := candidate{p: pluginProvider, model: "x/a:free", rest: pluginProvider.ID}
+	routerCand := candidate{p: pluginProvider, model: "openrouter/free", rest: pluginProvider.ID}
+	paidCand := candidate{p: pluginProvider, model: "x/paid", rest: pluginProvider.ID}
+
+	if !freeCand.openRouterFreeLimited(openRouterFreeMinute, http.StatusTooManyRequests) ||
+		!routerCand.openRouterFreeLimited(openRouterFreeDay, http.StatusTooManyRequests) ||
+		paidCand.openRouterFreeLimited(openRouterFreeMinute, http.StatusTooManyRequests) {
+		t.Fatalf("openRouterFreeLimited did not match plugin OpenRouter provider via VendorPreset")
+	}
+
+	reset := time.UnixMilli(time.Now().Add(45 * time.Second).UnixMilli())
+	header := http.Header{}
+	header.Set("X-RateLimit-Reset", strconv.FormatInt(reset.UnixMilli(), 10))
+	body := []byte(`{"error":{"message":"Rate limit exceeded: free-models-per-min.","code":429,"metadata":{"limit_source":"openrouter_free_tier_per_minute"}}}`)
+	server := New()
+	recorded := server.restAfter(freeCand, http.StatusTooManyRequests, header, body)
+	if recorded.Why != failRate || !recorded.Until.Equal(reset) {
+		t.Fatalf("plugin free-tier rest = %+v, want rate rest until %s", recorded, reset)
+	}
+	if _, wholeResting := restOf(freeCand.restKey()); wholeResting {
+		t.Fatal("plugin OpenRouter free-tier limit rested the whole provider")
+	}
+	if got, resting := routerCand.openRouterFreeRest(); !resting || !got.Until.Equal(reset) {
+		t.Fatalf("plugin openrouter/free rest = %+v (resting=%v), want until %s", got, resting, reset)
+	}
+	if _, paidResting := paidCand.openRouterFreeRest(); paidResting {
+		t.Fatal("plugin OpenRouter free-tier limit held a paid model")
+	}
+
+	wires := func() map[string]string {
+		return map[string]string{pluginProvider.ID + "/x/alias": "x/alias:free"}
+	}
+	out, _, _, _ := perKeyBarredWithWires(pluginProvider, "x/alias", provider.Chat, wires)
+	if len(out) != 1 {
+		t.Fatalf("perKeyBarredWithWires returned %d candidates, want 1", len(out))
+	}
+	if got, resting := out[0].openRouterFreeRest(); !resting || !got.Until.Equal(reset) {
+		t.Fatalf("plugin aliased free model did not keep wires or read free-tier rest: %+v (resting=%v)", got, resting)
+	}
+}
