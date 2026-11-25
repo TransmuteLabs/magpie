@@ -63,6 +63,7 @@ func (h *host) makeMain(url string) *application.WebviewWindow {
 	})
 	h.zoomWhenLoaded(w)
 	lowWhileHidden(w)
+	h.watchVisibility(w)
 	h.mendWebView(w)
 	if mainFrameless(runtime.GOOS) {
 		// resized from Windows' own border too, not the page's edge alone
@@ -150,6 +151,7 @@ func (h *host) makePanel() *application.WebviewWindow {
 	w := h.app.Window.NewWithOptions(po)
 	h.zoomWhenLoaded(w)
 	lowWhileHidden(w)
+	h.watchVisibility(w)
 	h.mendWebView(w)
 	if h.tray != nil {
 		h.tray.AttachWindow(w).WindowOffset(6)

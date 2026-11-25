@@ -123,6 +123,9 @@ type host struct {
 	// the quick panel's shortcut bound now, "" for none (panelkey_app.go)
 	keyMu    sync.Mutex
 	panelKey string
+
+	// appVisOnce wires macOS app hide/unhide visibility notifications once.
+	appVisOnce sync.Once
 }
 
 // whenReady runs fn once the main window can be shown safely.

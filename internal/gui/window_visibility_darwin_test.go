@@ -63,17 +63,42 @@ func TestPanelHiddenByWailsMarksPageOutOfSight(t *testing.T) {
 	}
 }
 
+// A panel created hidden (Hidden: true) never receives a hide event before its
+// page finishes loading. Its page must still be told it is out of sight once
+// navigation completes, or its timers and animations stay live while hidden.
+func TestHiddenPanelLoadMarksPageOutOfSight(t *testing.T) {
+	out, err := runAppKit(t, 2*time.Minute, []string{"MAGPIE_TEST_WINDOW_VISIBILITY=panel-hidden-load"})
+	if err != nil || !strings.Contains(string(out), "window visibility: ok") {
+		t.Fatalf("hidden panel load visibility: %v\n%s", err, out)
+	}
+}
+
+// System hides that bypass hideWebview on macOS — minimising, hiding the app
+// (Command-H), and occluding the window behind another — must still mark the
+// main window's page out of sight and restore it when visible again, while a
+// closed window stays hidden across an app hide/unhide cycle.
+func TestMacSystemHidesMarkMainWindowOutOfSight(t *testing.T) {
+	out, err := runAppKit(t, 2*time.Minute, []string{"MAGPIE_TEST_WINDOW_VISIBILITY=system-hide"})
+	if err != nil || !strings.Contains(string(out), "window visibility: ok") {
+		t.Fatalf("system hide visibility: %v\n%s", err, out)
+	}
+}
+
 func init() {
 	which := os.Getenv("MAGPIE_TEST_WINDOW_VISIBILITY")
-	if which != "1" && which != "panel" {
+	if which != "1" && which != "panel" && which != "panel-hidden-load" && which != "system-hide" {
 		return
 	}
 	ready := make(chan struct{}, 1)
 	hidden := make(chan url.Values, 1)
 	reports := make(chan url.Values, 1)
+	policy := application.ActivationPolicyProhibited
+	if which == "system-hide" {
+		policy = application.ActivationPolicyAccessory
+	}
 	app := application.New(application.Options{
 		Name: "magpie window visibility regression",
-		Mac:  application.MacOptions{ActivationPolicy: application.ActivationPolicyProhibited},
+		Mac:  application.MacOptions{ActivationPolicy: policy},
 		Assets: application.AssetOptions{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/":
@@ -186,6 +211,108 @@ fetch("/ready");
 	}
 	app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
 		go func() {
+			if which == "panel-hidden-load" {
+				var win *application.WebviewWindow
+				application.InvokeSync(func() {
+					win = h.makePanel()
+					h.panel = win
+				})
+				select {
+				case <-ready:
+				case <-time.After(15 * time.Second):
+					fail("timed out waiting for the hidden panel page")
+				}
+				wait("the hidden panel page to see itself hidden on load", hidden)
+				application.InvokeSync(func() { showWebview(win) })
+				check(wait("the hidden panel's report after show", reports))
+				fmt.Println("window visibility: ok")
+				app.Quit()
+				return
+			}
+			if which == "system-hide" {
+				onMain := func(fn func() bool) (ok bool) {
+					application.InvokeSync(func() { ok = fn() })
+					return
+				}
+				waitFor := func(what string, cond func() bool) {
+					for deadline := time.Now().Add(10 * time.Second); !onMain(cond); time.Sleep(20 * time.Millisecond) {
+						if time.Now().After(deadline) {
+							fail("timed out waiting until %s", what)
+						}
+					}
+				}
+				var win *application.WebviewWindow
+				application.InvokeSync(func() {
+					win = h.makeMain("/")
+					h.main = win
+					showWebview(win)
+				})
+				select {
+				case <-ready:
+				case <-time.After(15 * time.Second):
+					fail("timed out waiting for the main window page")
+				}
+				waitFor("the main window is open", func() bool { return windowOpen(win) })
+
+				// 1. Minimise / unminimise without calling hideWebview or showWebview.
+				application.InvokeSync(func() { win.Minimise() })
+				waitFor("the main window is minimised", func() bool { return win.IsMinimised() })
+				wait("the page to see itself hidden on minimise", hidden)
+				application.InvokeSync(func() { win.UnMinimise() })
+				waitFor("the main window is unminimised", func() bool { return windowOpen(win) })
+				check(wait("the page's report after unminimise", reports))
+
+				// 2. App hide (Command-H) / unhide without calling hideWebview or showWebview.
+				waitFor("magpie is hidden", func() bool {
+					if windowOpen(win) {
+						app.Hide()
+					}
+					return !windowOpen(win)
+				})
+				wait("the page to see itself hidden on app hide", hidden)
+				application.InvokeSync(app.Show)
+				waitFor("magpie is shown again", func() bool { return windowOpen(win) })
+				check(wait("the page's report after app unhide", reports))
+
+				// 3. Occluded behind another window on an unlocked screen.
+				if onMain(win.IsVisible) {
+					var cover *application.WebviewWindow
+					application.InvokeSync(func() {
+						x, y := win.Position()
+						wd, ht := win.Size()
+						cover = app.Window.NewWithOptions(application.WebviewWindowOptions{
+							Name: "cover", Width: wd + 200, Height: ht + 200,
+							Frameless: true, AlwaysOnTop: true,
+							BackgroundColour: application.NewRGB(0, 128, 128),
+						})
+						cover.SetPosition(x-100, y-100)
+						cover.Show()
+					})
+					waitFor("the cover hides the main window", func() bool { return !win.IsVisible() })
+					wait("the page to see itself hidden on occlusion", hidden)
+					application.InvokeSync(func() { cover.Close() })
+					waitFor("the main window is uncovered", win.IsVisible)
+					check(wait("the page's report after uncover", reports))
+				}
+
+				// 4. Closed main window stays hidden across an app hide/unhide cycle.
+				h.hideMain()
+				wait("the page to see itself hidden on close", hidden)
+				application.InvokeSync(app.Hide)
+				time.Sleep(200 * time.Millisecond)
+				application.InvokeSync(app.Show)
+				select {
+				case report := <-reports:
+					fail("closed window reported visible after app unhide: %v", report)
+				case <-time.After(400 * time.Millisecond):
+				}
+				application.InvokeSync(func() { showWebview(win) })
+				check(wait("the closed window's report after reopen", reports))
+
+				fmt.Println("window visibility: ok")
+				app.Quit()
+				return
+			}
 			var win *application.WebviewWindow
 			application.InvokeSync(func() {
 				if which == "panel" {

@@ -51,6 +51,70 @@ func sayWailsHides(w *application.WebviewWindow) {
 	w.RegisterKeyBinding("escape", func(application.Window) { hideWebview(w) })
 }
 
+// watchVisibility keeps a macOS window's page visibility aligned with AppKit
+// transitions that bypass hideWebview/showWebview: a window created hidden
+// finishing navigation, reload while hidden, miniaturise/deminiaturise,
+// occlusion (WindowHide/WindowShow), and Command-H / Hide Others.
+func (h *host) watchVisibility(w *application.WebviewWindow) {
+	if w == nil || pageHiddenJSOn(runtime.GOOS) == "" {
+		return
+	}
+	syncHidden := func() {
+		application.InvokeAsync(func() {
+			if !windowOpen(w) {
+				w.ExecJS(pageHiddenJS)
+			}
+		})
+	}
+	syncShown := func() {
+		application.InvokeAsync(func() {
+			if windowOpen(w) {
+				w.ExecJS(pageShownJS)
+			}
+		})
+	}
+	w.OnWindowEvent(events.Mac.WebViewDidFinishNavigation, func(*application.WindowEvent) { syncHidden() })
+	w.OnWindowEvent(events.Mac.WindowDidMiniaturize, func(*application.WindowEvent) { syncHidden() })
+	w.OnWindowEvent(events.Mac.WindowDidDeminiaturize, func(*application.WindowEvent) { syncShown() })
+	w.OnWindowEvent(events.Mac.WindowHide, func(*application.WindowEvent) {
+		application.InvokeAsync(func() {
+			if !w.IsVisible() {
+				w.ExecJS(pageHiddenJS)
+			}
+		})
+	})
+	w.OnWindowEvent(events.Mac.WindowShow, func(*application.WindowEvent) {
+		application.InvokeAsync(func() {
+			if windowOpen(w) && w.IsVisible() {
+				w.ExecJS(pageShownJS)
+			}
+		})
+	})
+	if h == nil || h.app == nil {
+		return
+	}
+	h.appVisOnce.Do(func() {
+		h.app.Event.OnApplicationEvent(events.Mac.ApplicationDidHide, func(*application.ApplicationEvent) {
+			application.InvokeAsync(func() {
+				for _, win := range []*application.WebviewWindow{h.main, h.panel, h.remote} {
+					if win != nil && !windowOpen(win) {
+						win.ExecJS(pageHiddenJS)
+					}
+				}
+			})
+		})
+		h.app.Event.OnApplicationEvent(events.Mac.ApplicationDidUnhide, func(*application.ApplicationEvent) {
+			application.InvokeAsync(func() {
+				for _, win := range []*application.WebviewWindow{h.main, h.panel, h.remote} {
+					if win != nil && windowOpen(win) {
+						win.ExecJS(pageShownJS)
+					}
+				}
+			})
+		})
+	})
+}
+
 // pageHiddenJSOn is what a page on goos is told as its window hides.
 func pageHiddenJSOn(goos string) string {
 	if goos != "darwin" {

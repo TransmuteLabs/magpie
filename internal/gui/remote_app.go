@@ -34,6 +34,7 @@ func (h *host) OpenRemote(link, title string) {
 			Zoom:      h.zoom(),
 		})
 		h.remote = w
+		h.watchVisibility(w)
 		// closed, it is gone; the next Open makes it again
 		w.OnWindowEvent(events.Common.WindowClosing, func(*application.WindowEvent) {
 			application.InvokeAsync(func() {
